@@ -2,9 +2,9 @@
  * Runtime registry for BYOA agents.
  *
  * The mature Claude Code / Codex implementations live unchanged in
- * `engine-core.ts`. This thin registry composes those adapters with additional
- * runtimes so adding a new engine no longer requires editing the large core
- * implementation. Pi is the first runtime added through this layer.
+ * `engine-core.ts`. This registry adds runtime-wide policy on top: additional
+ * engines (Pi today) and per-agent small-brain model resolution shared by every
+ * adapter.
  */
 import { spawn } from 'node:child_process'
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -56,7 +56,7 @@ const PI_SESSION_SENTINEL = 'pi-continue'
 const MAX_FAILURE_LINES = 30
 const MAX_FAILURE_CHARS = 4000
 const ANSI_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g
-const COMPUTER_CONFIG_PATH = join(homedir(), '.cumora', 'computer.json')
+const DEFAULT_COMPUTER_CONFIG_PATH = join(homedir(), '.cumora', 'computer.json')
 const AGENT_CONFIG_CACHE_MS = 30_000
 
 function cleanLine(line: string): string {
@@ -119,11 +119,7 @@ async function ensurePiHome(home: string, persona: EnginePersona): Promise<void>
   }
 }
 
-type PiCaptureResult = {
-  exitCode: number
-  text: string
-  error?: string
-}
+type PiCaptureResult = { exitCode: number; text: string; error?: string }
 
 function spawnPiCapture(args: string[], opts: {
   cwd: string
@@ -190,17 +186,16 @@ type ComputerConfig = { serverUrl?: string; deviceToken?: string }
 let agentConfigCache: { at: number; rows: SyncedAgentRuntimeConfig[] } | null = null
 let agentConfigFetch: Promise<SyncedAgentRuntimeConfig[]> | null = null
 
+function computerConfigPath(): string {
+  return process.env.CUMORA_COMPUTER_CONFIG_PATH?.trim() || DEFAULT_COMPUTER_CONFIG_PATH
+}
+
 /**
- * Read the same server-owned assignment/config feed the daemon syncs from.
- *
- * Why this lives at the registry edge for now: the legacy daemon's classify()
- * call predates per-agent fast models and only passes its global override. Pi is
- * the first runtime where guessing a cheap default is unsafe because any provider
- * can be configured. The engine already receives CUMORA_AGENT_ID; using the
- * daemon's revocable device credential lets us resolve *that agent's* fastModel
- * without a duplicate local settings store. Cache briefly to avoid one request
- * per inbox poll. Once daemon Runtime Config becomes first-class, this helper can
- * disappear and classify() can receive the value directly.
+ * Resolve the server-owned per-agent fast model without creating a second local
+ * settings store. The daemon already authenticates this computer with a revocable
+ * device token; the registry reuses that same read-only agent feed and caches it
+ * briefly. This closes a legacy gap where daemon classify() only passed its global
+ * override even though participants already carried `fastModel`.
  */
 async function syncedFastModel(agentId: string | undefined): Promise<string | null> {
   if (!agentId) return null
@@ -211,7 +206,7 @@ async function syncedFastModel(agentId: string | undefined): Promise<string | nu
 
   if (!agentConfigFetch) {
     agentConfigFetch = (async () => {
-      const raw = JSON.parse(await readFile(COMPUTER_CONFIG_PATH, 'utf8')) as ComputerConfig
+      const raw = JSON.parse(await readFile(computerConfigPath(), 'utf8')) as ComputerConfig
       const serverUrl = raw.serverUrl?.replace(/\/+$/, '')
       const token = raw.deviceToken
       if (!serverUrl || !token) throw new Error('Cumora computer config is missing serverUrl/deviceToken')
@@ -230,32 +225,49 @@ async function syncedFastModel(agentId: string | undefined): Promise<string | nu
     const rows = await agentConfigFetch
     return rows.find((row) => row.id === agentId)?.fastModel?.trim() || null
   } catch {
-    // A transient server/config failure must not make us fall back to a main
-    // model; caller will use the explicit deployment fallback or fail closed.
+    // Transient sync failure: return null so the runtime uses its safe built-in
+    // fallback (Claude/Codex) or fails closed rather than selecting a Pi main model.
     return null
   }
 }
 
-/** Resolve Pi's small brain, in strict precedence order. */
-async function piFastModel(args: EngineClassifyArgs): Promise<string | null> {
+/** Global override > per-agent setting > adapter-specific safe default. */
+async function classifyModel(args: EngineClassifyArgs): Promise<string | null> {
   const explicit = args.model?.trim()
-  if (explicit) return explicit // daemon-wide CUMORA_TRIAGE_MODEL override
-  const perAgent = await syncedFastModel(args.env.CUMORA_AGENT_ID)
-  if (perAgent) return perAgent
-  return process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() || null
+  if (explicit) return explicit
+  return syncedFastModel(args.env.CUMORA_AGENT_ID)
+}
+
+/** Wrap legacy core adapters so their classify() path also honors Agent.fastModel. */
+class ConfiguredCoreAdapter implements EngineAdapter {
+  readonly id: core.EngineId
+  readonly bin: string
+  constructor(private readonly base: core.EngineAdapter) {
+    this.id = base.id
+    this.bin = base.bin
+  }
+  seedHome(home: string, persona: EnginePersona): Promise<void> { return this.base.seedHome(home, persona) }
+  run(args: EngineRunArgs): Promise<EngineRunResult> { return this.base.run(args) }
+  startSession(args: EngineSessionArgs): EngineSession | null { return this.base.startSession?.(args) ?? null }
+  async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
+    const model = await classifyModel(args)
+    return this.base.classify({ ...args, model })
+  }
+  probe(args: EngineProbeArgs): Promise<EngineClassifyResult> { return this.base.probe(args) }
+  probeWake(args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> { return this.base.probeWake(args) }
 }
 
 class PiAdapter implements EngineAdapter {
   readonly id = 'pi' as const
   readonly bin = 'pi'
 
-  seedHome(home: string, persona: EnginePersona): Promise<void> {
-    return ensurePiHome(home, persona)
-  }
+  seedHome(home: string, persona: EnginePersona): Promise<void> { return ensurePiHome(home, persona) }
 
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     const flags = extraArgs('CUMORA_PI_TRIAGE_ARGS')
-    const fast = await piFastModel(args)
+    const fast = (await classifyModel(args)) || process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() || null
+    // Pi can host arbitrary providers. Never guess that its default/main model is
+    // cheap enough for triage: no explicit/global/per-agent small model = no call.
     if (!fast && flags.length === 0) {
       return {
         text: '',
@@ -279,9 +291,9 @@ class PiAdapter implements EngineAdapter {
   }
 
   async probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    // Doctor has no agent identity, so its small-brain probe can only validate
-    // the deployment-level Pi fallback. Per-agent Fast model health is exercised
-    // by the real triage path after assignment.
+    // Doctor is machine-level and has no Agent id, so small-brain health can only
+    // probe the optional deployment fallback. Real per-agent settings are tested
+    // by their actual triage calls.
     const fast = args.tier === 'small' ? process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() : null
     if (args.tier === 'small' && !fast) {
       return {
@@ -310,10 +322,7 @@ class PiAdapter implements EngineAdapter {
     const flags = extraArgs('CUMORA_PI_ARGS')
     const model = args.model ? ['--model', args.model] : []
     const resume = args.resumeSessionId === PI_SESSION_SENTINEL ? ['--continue'] : []
-    const argv = flags.length
-      ? ['-p', ...resume, ...flags]
-      : ['-p', '--approve', ...resume, ...model]
-
+    const argv = flags.length ? ['-p', ...resume, ...flags] : ['-p', '--approve', ...resume, ...model]
     const r = await spawnPiCapture(argv, {
       cwd: args.home,
       env: args.env,
@@ -321,7 +330,6 @@ class PiAdapter implements EngineAdapter {
       signal: args.signal,
       onLog: args.onLog,
     })
-
     return {
       exitCode: r.exitCode,
       error: r.error,
@@ -331,18 +339,16 @@ class PiAdapter implements EngineAdapter {
   }
 }
 
-const PI_ADAPTER = new PiAdapter()
-
-export function getAdapter(id: EngineId): EngineAdapter {
-  if (id === 'pi') return PI_ADAPTER
-  return core.getAdapter(id as core.EngineId) as EngineAdapter
+const ADAPTERS: Record<EngineId, EngineAdapter> = {
+  claude: new ConfiguredCoreAdapter(core.getAdapter('claude')),
+  codex: new ConfiguredCoreAdapter(core.getAdapter('codex')),
+  pi: new PiAdapter(),
 }
 
+export function getAdapter(id: EngineId): EngineAdapter { return ADAPTERS[id] }
+
 export async function detectEngines(): Promise<EngineId[]> {
-  const [base, pi] = await Promise.all([
-    core.detectEngines(),
-    core.binOnPath('pi'),
-  ])
+  const [base, pi] = await Promise.all([core.detectEngines(), core.binOnPath('pi')])
   return pi ? [...base, 'pi'] : [...base]
 }
 
@@ -351,13 +357,9 @@ async function probePiTier(tier: 'big' | 'small', cwd: string, env: NodeJS.Proce
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const t0 = Date.now()
   let result: EngineClassifyResult
-  try {
-    result = await PI_ADAPTER.probe({ tier, cwd, env, signal: controller.signal })
-  } catch (err) {
-    result = { text: '', error: err instanceof Error ? err.message : String(err) }
-  } finally {
-    clearTimeout(timer)
-  }
+  try { result = await ADAPTERS.pi.probe({ tier, cwd, env, signal: controller.signal }) }
+  catch (err) { result = { text: '', error: err instanceof Error ? err.message : String(err) } }
+  finally { clearTimeout(timer) }
   const ms = Date.now() - t0
   if (controller.signal.aborted) return { ok: false, ms, detail: `timed out after ${timeoutMs}ms` }
   if (result.error || !result.text.trim()) return { ok: false, ms, detail: cleanLine(result.error || 'no output').slice(0, 280) }
@@ -382,11 +384,7 @@ export async function runEngineDoctor(opts?: {
   const small = await probePiTier('small', cwd, env, timeoutMs)
   const base = await basePromise
   return [...base, {
-    id: 'pi',
-    installed: true,
-    path,
-    big,
-    small,
+    id: 'pi', installed: true, path, big, small,
     wake: { ok: true, ms: 0, detail: '', skipped: true },
   }]
 }
