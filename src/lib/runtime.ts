@@ -1,5 +1,7 @@
 /** Runtime detection — is this Cumora running inside Electron, mobile webview, or browser? */
 
+import type { LocalRuntimeModelResult } from '@/lib/localRuntimeModels'
+
 export interface NotificationPushPayload {
   id: string
   /** Underlying message id — used by the notification renderer to
@@ -64,6 +66,8 @@ interface CumoraBridge {
   localRuntime?: {
     status: () => Promise<LocalRuntimeStatus>
     connect: (options: { pairCode: string; serverUrl?: string | null; engine?: LocalRuntimeEngine | null }) => Promise<LocalRuntimeConnectResult>
+    /** Runtime-owned model catalog. Optional so older desktop shells remain compatible. */
+    models?: (engine: LocalRuntimeEngine) => Promise<LocalRuntimeModelResult>
     stop: () => Promise<LocalRuntimeStatus>
   }
   notify?: {
