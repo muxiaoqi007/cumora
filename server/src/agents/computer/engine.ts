@@ -7,7 +7,7 @@
  * Runtime Options shared by every adapter.
  */
 import { spawn } from 'node:child_process'
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as core from './engine-core.js'
@@ -126,6 +126,66 @@ async function ensurePiHome(home: string, persona: EnginePersona): Promise<void>
   }
 }
 
+/**
+ * Cumora's generated agent bin directory is already first on PATH so the model
+ * can call the `cumora` shim. Put a transparent Codex policy shim beside it:
+ * it locates the REAL codex executable on the remainder of PATH, keeps the
+ * original PATH for Codex/tool calls, and injects only the validated reasoning
+ * override. Both `codex exec` and `codex app-server` therefore inherit the same
+ * per-agent policy without editing the mature core adapter/session protocol.
+ */
+const CODEX_POLICY_SHIM = `#!/usr/bin/env node
+'use strict'
+const { spawn } = require('node:child_process')
+const fs = require('node:fs')
+const path = require('node:path')
+const ownDir = path.resolve(__dirname)
+const originalPath = String(process.env.PATH || '')
+const dirs = originalPath.split(path.delimiter).filter(Boolean)
+const exts = process.platform === 'win32'
+  ? String(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  : ['']
+let real = null
+for (const dir of dirs) {
+  if (path.resolve(dir) === ownDir) continue
+  for (const ext of exts) {
+    const candidate = path.join(dir, 'codex' + ext)
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) { real = candidate; break }
+    } catch {}
+  }
+  if (real) break
+}
+if (!real) {
+  console.error('cumora codex shim: real codex executable not found after agent bin directory')
+  process.exit(127)
+}
+const args = process.argv.slice(2)
+const effort = String(process.env.CUMORA_CODEX_REASONING_EFFORT || '').trim()
+if (effort && /^[A-Za-z0-9._-]{1,40}$/.test(effort)) {
+  args.unshift('-c', 'model_reasoning_effort="' + effort + '"')
+}
+const shell = /\\.(cmd|bat)$/i.test(real)
+const child = spawn(real, args, { stdio: 'inherit', env: process.env, shell })
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { try { child.kill(sig) } catch {} })
+}
+child.on('error', (err) => { console.error('cumora codex shim:', err.message || err); process.exit(127) })
+child.on('exit', (code, signal) => {
+  if (signal) { try { process.kill(process.pid, signal) } catch { process.exit(128) } }
+  else process.exit(typeof code === 'number' ? code : 1)
+})
+`
+
+async function installCodexPolicyShim(home: string): Promise<void> {
+  if (process.platform === 'win32') return
+  const binDir = join(home, 'bin')
+  const shim = join(binDir, 'codex')
+  await mkdir(binDir, { recursive: true })
+  await writeFile(shim, CODEX_POLICY_SHIM, 'utf8')
+  await chmod(shim, 0o755)
+}
+
 type PiCaptureResult = { exitCode: number; text: string; error?: string }
 
 function spawnPiCapture(args: string[], opts: {
@@ -207,13 +267,6 @@ async function pairedComputerConfig(): Promise<{ serverUrl: string; deviceToken:
   return { serverUrl, deviceToken }
 }
 
-/**
- * Resolve the server-owned per-agent fast model without creating a second local
- * settings store. The daemon already authenticates this computer with a revocable
- * device token; the registry reuses that same read-only agent feed and caches it
- * briefly. This closes a legacy gap where daemon classify() only passed its global
- * override even though participants already carried `fastModel`.
- */
 async function syncedFastModel(agentId: string | undefined): Promise<string | null> {
   if (!agentId) return null
   const now = Date.now()
@@ -301,6 +354,25 @@ async function classifyModel(args: EngineClassifyArgs): Promise<string | null> {
   return syncedFastModel(args.env.CUMORA_AGENT_ID)
 }
 
+function runCodexOnWindowsWithEffort(
+  base: core.EngineAdapter,
+  args: EngineRunArgs,
+  effort: string,
+): Promise<EngineRunResult> {
+  // Windows core resolves the .cmd shim from process.env rather than args.env,
+  // and app-server is already disabled there. Inject the equivalent global CLI
+  // `-c` only for the synchronous spawn setup, then restore immediately. No
+  // await occurs while process.env is mutated, so another Agent cannot interleave.
+  const previous = process.env.CUMORA_CODEX_ARGS
+  const defaults = previous?.trim() || '--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check'
+  process.env.CUMORA_CODEX_ARGS = `${defaults} -c model_reasoning_effort="${effort}"`
+  try { return base.run(args) }
+  finally {
+    if (previous == null) delete process.env.CUMORA_CODEX_ARGS
+    else process.env.CUMORA_CODEX_ARGS = previous
+  }
+}
+
 /** Wrap legacy core adapters so classify/run/session paths honor Agent config. */
 class ConfiguredCoreAdapter implements EngineAdapter {
   readonly id: core.EngineId
@@ -309,10 +381,17 @@ class ConfiguredCoreAdapter implements EngineAdapter {
     this.id = base.id
     this.bin = base.bin
   }
-  seedHome(home: string, persona: EnginePersona): Promise<void> { return this.base.seedHome(home, persona) }
+  async seedHome(home: string, persona: EnginePersona): Promise<void> {
+    await this.base.seedHome(home, persona)
+    if (this.id === 'codex') await installCodexPolicyShim(home)
+  }
   async run(args: EngineRunArgs): Promise<EngineRunResult> {
     const options = this.id === 'codex' ? await syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : {}
-    return this.base.run({ ...args, env: applyCoreRuntimeOptions(args.env, options) })
+    const configured = { ...args, env: applyCoreRuntimeOptions(args.env, options) }
+    if (this.id === 'codex' && process.platform === 'win32' && options.reasoningEffort) {
+      return runCodexOnWindowsWithEffort(this.base, configured, options.reasoningEffort)
+    }
+    return this.base.run(configured)
   }
   startSession(args: EngineSessionArgs): EngineSession | null {
     if (this.id !== 'codex') return this.base.startSession?.(args) ?? null
@@ -328,7 +407,10 @@ class ConfiguredCoreAdapter implements EngineAdapter {
       classifyModel(args),
       this.id === 'codex' ? syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : Promise.resolve({}),
     ])
-    return this.base.classify({ ...args, model, env: applyCoreRuntimeOptions(args.env, options) })
+    // Do NOT force the main-brain reasoning override into triage CLI flags; the
+    // small model owns its own cheap/default reasoning behavior. We only warm the
+    // Runtime Options cache here so the subsequent app-server session is ready.
+    return this.base.classify({ ...args, model, env: this.id === 'codex' ? args.env : applyCoreRuntimeOptions(args.env, options) })
   }
   probe(args: EngineProbeArgs): Promise<EngineClassifyResult> { return this.base.probe(args) }
   probeWake(args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> { return this.base.probeWake(args) }
