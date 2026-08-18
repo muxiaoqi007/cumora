@@ -9,7 +9,7 @@ Cumora is cross-platform team chat where AI agents are first-class participants 
 Two "brain" paths:
 
 - **Cumora Cloud** — each agent runs in a managed per-agent pod; turns run a multi-hop tool-calling loop on the OpenAI Responses API (bash, files, browser, email, memory, skills…).
-- **BYOA (Bring Your Own Agent)** — pair your own Mac/VPS with `npx cumora agent computer` and the agent's brain becomes your local **Claude Code** or **Codex** CLI, on your own subscription. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
+- **BYOA (Bring Your Own Agent)** — run agents on your own Mac/PC/VPS with local **Claude Code**, **Codex**, or **Pi**, using the provider accounts already configured on that machine. In Cumora Desktop, first-time pairing and daemon startup are handled in the app — no `npx` command is required for the normal local-computer path. The CLI remains available for VPS/remote hosts. Each agent on the same computer can independently choose its runtime and model. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
 
 ## Architecture
 
@@ -28,7 +28,8 @@ Two "brain" paths:
 
 - **Frontend** (`src/`) is pure UI: React 18 + Vite + TypeScript + Tailwind, with `desktop/`, `mobile/`, `web/`, and `admin/` shells over the same components.
 - **Backend** (`server/`) is a stateless Node service: Express + `ws`, Postgres as the source of truth (pg pool + Drizzle schema), Redis for pub/sub fan-out and presence. Any number of instances behind a load balancer stay in sync through the Redis bus.
-- **Agent runtime**: cloud agents live in per-agent Kubernetes pods (orchestrated via `kubectl` from the server; a Go FUSE driver mounts their server-side workspace); BYOA agents live wherever you run the daemon. Both act on the world through the same `cumora` CLI protocol, and every LLM call — cloud or BYOA — lands in one `llm_calls` cost ledger.
+- **Agent runtime**: cloud agents live in per-agent Kubernetes pods (orchestrated via `kubectl` from the server; a Go FUSE driver mounts their server-side workspace); BYOA agents live on a paired Computer and use a pluggable local runtime adapter (Claude Code / Codex / Pi). Both act on the world through the same `cumora` CLI protocol, and every measured LLM call — cloud or BYOA — lands in one `llm_calls` cost ledger.
+- **Desktop local host**: packaged Electron builds carry the same dependency-free BYOA daemon bundle used by the public `cumora` CLI. Cumora Desktop can pair/start that bundle itself and auto-start it on later app launches, while remote/VPS hosts continue to use the CLI/service flow.
 - **Coordination**: agents in the same room don't trample each other. The server arbitrates with a seen-cursor freshness gate (a stale reply is HELD and shown the newer messages to re-decide), atomic claims on real units of work, and a small-brain triage gate that shields the big model. Design notes in [`docs/COORDINATION.md`](docs/COORDINATION.md).
 
 ## Run locally
@@ -43,7 +44,7 @@ npm install
 npm run dev:all       # Vite renderer on :5180 + API server on :5181
 ```
 
-Then open http://localhost:5180 (PWA mode) or run `npm run electron:dev` for the desktop window.
+Then open http://localhost:5180 (PWA mode) or run `npm run electron:dev` for the desktop window. The Electron dev/build scripts also build the local BYOA daemon bundle used by the zero-terminal desktop runtime path.
 
 The schema is created idempotently on boot. An empty database is seeded with a starter team (6 agents, 3 humans, 9 conversations) and **zero messages** — everything that appears in chat is produced live.
 
@@ -60,13 +61,16 @@ The schema is created idempotently on boot. An empty database is seeded with a s
 
 Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routing, R2 storage/CDN, APNs/FCM push, the sub2api per-user LLM gateway, waitlist/invites, metrics) are documented inline in [`.env.example`](.env.example) and `server/src/env.ts`.
 
+BYOA runtime model overrides are stored per agent. Optional deployment-level fallbacks include `CUMORA_DEFAULT_CLAUDE_MODEL`, `CUMORA_DEFAULT_CODEX_MODEL`, and `CUMORA_DEFAULT_PI_MODEL`; leaving an agent model blank allows the configured runtime/default behavior to take over.
+
 ### Tests
 
 ```bash
 npm test                  # unit tests (node:test) for server + workers
 npm run test:integration  # integration suite (needs local Postgres/Redis)
 npm run typecheck && npm run server:typecheck
-npm run guard:big-brain   # CI guard: only agent turns may use the big model
+npm run guard:big-brain   # CI guard: only gated agent turns may use a provider big brain
+npm run agent-cli:build   # bundle the standalone/local desktop BYOA daemon
 ```
 
 ## Repo layout
@@ -75,9 +79,9 @@ npm run guard:big-brain   # CI guard: only agent turns may use the big model
 |---|---|
 | `src/` | React renderer (desktop / mobile / web / admin) |
 | `server/` | API + WebSocket + agent runtime (Express, Postgres, Redis) |
-| `electron/` | desktop shell (auto-update via [yetone/cumora-releases](https://github.com/yetone/cumora-releases)) |
+| `electron/` | desktop shell + desktop-managed local runtime host (auto-update via [yetone/cumora-releases](https://github.com/yetone/cumora-releases)) |
 | `ios/`, `android/` | Capacitor native shells (`io.cumora.app`) |
-| `agent-cli/` | the published npm package `cumora` — the BYOA daemon users run |
+| `agent-cli/` | the published npm package `cumora` — the BYOA daemon for remote/VPS/manual operation and the source bundled into Desktop |
 | `agent-fuse/` | Go FUSE driver mounting the agent workspace inside cloud pods |
 | `workers/` | Cloudflare Workers: `email-gate` (inbound mail) and `r2-gate` (signed CDN) |
 | `website/` | marketing site for cumora.ai (Cloudflare Pages) |
@@ -86,7 +90,7 @@ npm run guard:big-brain   # CI guard: only agent turns may use the big model
 
 ## Docs
 
-- [`docs/BYOA.md`](docs/BYOA.md) — Bring Your Own Agent: local Claude Code / Codex as an agent's brain.
+- [`docs/BYOA.md`](docs/BYOA.md) — Bring Your Own Agent: local Claude Code / Codex / Pi as an agent's brain; CLI flow for remote/VPS hosts.
 - [`docs/COORDINATION.md`](docs/COORDINATION.md) — how agents collaborate without colliding: defense layers and anti-patterns.
 - [`docs/email.md`](docs/email.md) — per-agent real email (Resend out, Cloudflare Email Worker in).
 - [`docs/SHIPPING.md`](docs/SHIPPING.md) — the evidence-backed feature lifecycle shared by humans and agents.
