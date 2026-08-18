@@ -11,7 +11,7 @@
  *      the app loads, otherwise we fall through to AuthScreen.
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { api } from '@/api/client'
+import { api, http } from '@/api/client'
 import { useAuth } from '@/stores/auth'
 import { isElectron } from '@/lib/runtime'
 import { AuthScreen } from './AuthScreen'
@@ -51,6 +51,37 @@ export function AuthGate({ children, unauthFallback }: AuthGateProps) {
   const setServerCapabilities = useAuth((s) => s.setServerCapabilities)
   const clear = useAuth((s) => s.clear)
   const markReady = useAuth((s) => s.markReady)
+
+  // ─── Electron local mode: auto-login ───
+  // When running inside Electron with a local server, wait for the
+  // server to become healthy, then call /auth/local-login to get a
+  // session token. The user never sees an auth screen.
+  const [localError, setLocalError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!isElectron || !window.cumora?.localServer) return
+    let cancelled = false
+    const offError = window.cumora.localServer.onError?.((error) => {
+      if (!cancelled) setLocalError(error || 'Local server failed to start')
+    })
+    void (async () => {
+      const ok = await window.cumora!.localServer!.wait()
+      if (cancelled) return
+      if (!ok) {
+        setLocalError('Local server failed to start. Check ~/Library/Application Support/cumora/local-server.log')
+        return
+      }
+      try {
+        const r = await http<{ token: string; user: { id: string; email: string; displayName: string }; companyId: string }>(
+          '/auth/local-login', { method: 'POST', body: '{}' },
+        )
+        if (cancelled) return
+        setSession(r.token, { id: r.user.id, email: r.user.email, name: r.user.displayName }, r.companyId)
+      } catch (e) {
+        if (!cancelled) setLocalError(e instanceof Error ? e.message : String(e))
+      }
+    })()
+    return () => { cancelled = true; offError?.() }
+  }, [setSession])
 
   // Run-once: consume the OAuth fragment before the probe effect sees
   // `token` and decides what to do. useState init runs synchronously
@@ -122,6 +153,28 @@ export function AuthGate({ children, unauthFallback }: AuthGateProps) {
         className="fixed inset-0 grid place-items-center text-ink-300 font-display italic text-[13px]"
         style={{ background: 'var(--paper)' }}
       ><WindowDragStrip />loading…</div>
+    )
+  }
+
+  // Electron local mode: show a startup screen instead of the auth page
+  // while the local server is booting or auto-login is in progress.
+  if (!token && isElectron && window.cumora?.localServer) {
+    if (localError) {
+      return (
+        <div className="fixed inset-0 grid place-items-center" style={{ background: 'var(--paper)' }}>
+          <WindowDragStrip />
+          <div className="text-center max-w-[400px] px-6">
+            <div className="text-[18px] font-medium text-coral-deep mb-2">Startup error</div>
+            <div className="text-[13px] text-ink-500 whitespace-pre-wrap">{localError}</div>
+          </div>
+        </div>
+      )
+    }
+    return (
+      <div
+        className="fixed inset-0 grid place-items-center text-ink-300 font-display italic text-[13px]"
+        style={{ background: 'var(--paper)' }}
+      ><WindowDragStrip />starting local server…</div>
     )
   }
 

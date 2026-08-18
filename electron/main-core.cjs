@@ -6,6 +6,8 @@ const http = require('node:http')
 const crypto = require('node:crypto')
 const { pathToFileURL } = require('node:url')
 const autoUpdater = require('./autoUpdater.cjs')
+const localDb = require('./localDb.cjs')
+const localServer = require('./localServer.cjs')
 
 const isDev = !app.isPackaged
 const DEV_URL = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5180'
@@ -1408,6 +1410,56 @@ app.whenReady().then(() => {
   // in createWindow already has its `tray` guard satisfied — no chance
   // of hiding to a non-existent tray.
   createTray()
+
+  // ─── Local server: start PostgreSQL + Cumora server in the background ───
+  // The window shows immediately; the server comes up asynchronously.
+  // When ready, the renderer is notified via IPC so it can auto-login.
+  if (!process.env.CUMORA_SKIP_LOCAL_SERVER) {
+    void (async () => {
+      try {
+        const fs2 = require('node:fs')
+        const path2 = require('node:path')
+        const dbgLog = (msg) => {
+          const f = path2.join(app.getPath('userData'), 'local-server.log')
+          try { fs2.appendFileSync(f, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
+          console.log(msg)
+        }
+        dbgLog('[local] starting database...')
+        const dbUrl = await localDb.ensure()
+        dbgLog('[local] database ready: ' + dbUrl)
+        const apiKey = process.env.OPENAI_API_KEY || ''
+        dbgLog('[local] starting server...')
+        await localServer.start(dbUrl, apiKey)
+        dbgLog('[local] server started successfully')
+        // Notify the renderer that the local server is ready.
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('local-server:ready')
+        }
+      } catch (e) {
+        const fs2 = require('node:fs')
+        const path2 = require('node:path')
+        const dbgLog = (msg) => {
+          const f = path2.join(app.getPath('userData'), 'local-server.log')
+          try { fs2.appendFileSync(f, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
+          console.log(msg)
+        }
+        dbgLog('[local] server startup FAILED: ' + (e?.stack || e?.message || String(e)))
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('local-server:error', e?.message || String(e))
+        }
+      }
+    })()
+  }
+
+  ipcMain.handle('local-server:is-ready', () => localServer.isReady())
+  ipcMain.handle('local-server:wait', async (_event, timeoutSec) => {
+    if (localServer.isReady()) return true
+    const ms = (Number(timeoutSec) > 0 ? Number(timeoutSec) : 60) * 1000
+    return new Promise((resolve) => {
+      localServer.onReady(() => resolve(true))
+      setTimeout(() => resolve(false), ms)
+    })
+  })
   if (process.platform === 'darwin') {
     // Belt-and-suspenders: with `type: 'panel'` on the notification
     // BrowserWindow we should never lose the regular activation policy,
@@ -1568,6 +1620,9 @@ app.on('before-quit', () => {
     try { authLoopbackServer.closeAllConnections?.() } catch { /* swallow */ }
     authLoopbackServer = null
   }
+  // Stop the local server + database.
+  try { localServer.stop() } catch { /* swallow */ }
+  try { localDb.stop() } catch { /* swallow */ }
   if (tray && !tray.isDestroyed?.()) {
     try { tray.destroy() } catch { /* swallow */ }
     tray = null

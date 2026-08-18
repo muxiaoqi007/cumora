@@ -70,6 +70,13 @@ interface CumoraBridge {
     models?: (engine: LocalRuntimeEngine) => Promise<LocalRuntimeModelResult>
     stop: () => Promise<LocalRuntimeStatus>
   }
+  /** Local server status — only present in Electron (desktop) builds. */
+  localServer?: {
+    isReady: () => Promise<boolean>
+    wait: () => Promise<boolean>
+    onReady: (handler: () => void) => () => void
+    onError: (handler: (error: string) => void) => () => void
+  }
   notify?: {
     /** Main → notification window: show this toast. */
     push: (p: NotificationPushPayload) => void

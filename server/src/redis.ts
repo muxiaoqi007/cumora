@@ -1,6 +1,10 @@
 import IORedis from 'ioredis'
 import { env } from './env.js'
 
+// Local/desktop mode: replace the real Redis connection with an in-process
+// EventEmitter + Map implementation. No network, no external dependency.
+const IS_LOCAL = process.env.CUMORA_REDIS_MODE === 'local'
+
 // When the agent runtime is in http mode (pod talking to a remote
 // server), Redis is never used from this process — every pub/sub flows
 // through /runtime/* on the server side. Connect lazily so the bundle
@@ -10,21 +14,27 @@ import { env } from './env.js'
 const lazyConnect = process.env.CUMORA_RUNTIME_CLIENT === 'http'
 
 /** Single shared client for normal commands. */
-export const redis = new IORedis(env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
-  lazyConnect,
-})
+export const redis = IS_LOCAL
+  ? (require('./redis-local.js').redis as IORedis)
+  : new IORedis(env.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: true,
+      lazyConnect,
+    })
 
 /** Separate connection for blocking SUBSCRIBE — required by the Redis protocol. */
-export const sub = new IORedis(env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
-  lazyConnect,
-})
+export const sub = IS_LOCAL
+  ? (require('./redis-local.js').sub as IORedis)
+  : new IORedis(env.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: true,
+      lazyConnect,
+    })
 
-redis.on('error', (e) => console.error('[redis]', e))
-sub.on('error', (e) => console.error('[redis sub]', e))
+if (!IS_LOCAL) {
+  ;(redis as IORedis).on('error', (e: Error) => console.error('[redis]', e))
+  ;(sub as IORedis).on('error', (e: Error) => console.error('[redis sub]', e))
+}
 
 /* === Channel keys === */
 export const CH_MESSAGE_NEW = 'cumora:msg.new'

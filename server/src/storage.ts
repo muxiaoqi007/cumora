@@ -91,7 +91,7 @@ export function signedUrlExpiresSoon(raw: string, leewaySeconds = 300): boolean 
 /** Local fallback directory. Same path the static handler historically
  *  served from, so existing /uploads/<file> URLs keep working after the
  *  abstraction lands. */
-export const UPLOAD_DIR = resolve(process.cwd(), 'server/uploads')
+export const UPLOAD_DIR = resolve(process.env.CUMORA_UPLOAD_DIR || join(process.cwd(), 'server/uploads'))
 
 /** One enumerated object. lastModifiedMs is the storage backend's notion
  *  of when the object was last written — GC uses it to spare keys that

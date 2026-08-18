@@ -142,7 +142,7 @@ export function AgentEditor({ agent, onClose }: Props) {
   }, [cloud, firstByoa, computerId, isFreeTier])
 
   const loadRuntimeModels = async (): Promise<void> => {
-    if (!canDiscoverModels || !localRuntimeModelBridge || engine === 'managed') return
+    if (!canDiscoverModels || !localRuntimeModelBridge) return
     setRuntimeModelsBusy(true)
     setRuntimeModelsErr(null)
     try {

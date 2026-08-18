@@ -746,6 +746,94 @@ api.post('/auth/apple/native', safe(async (req, res) => {
   }
 }))
 
+/* ============== /auth/local-login — desktop local mode ==============
+ * No-password auto-login for the bundled desktop app. Creates (or
+ * reuses) a single local user + company, mints a session token, and
+ * returns the same shape as /auth/apple/native so the frontend
+ * AuthGate can consume it identically. Only available when
+ * CUMORA_LOCAL_MODE=true. */
+api.post('/auth/local-login', safe(async (req, res) => {
+  if (!env.LOCAL_MODE) { res.status(404).json({ error: 'not found' }); return }
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      `SELECT id FROM users WHERE email = 'local@cumora.dev' AND deleted_at IS NULL LIMIT 1`,
+    )
+    let userId: string
+    if (rows[0]) {
+      userId = rows[0].id
+    } else {
+      userId = `u-${randomUUID()}`
+      await pool.query(
+        `INSERT INTO users (id, email, display_name, email_verified_at, tier)
+         VALUES ($1, 'local@cumora.dev', 'Me', NOW(), 'pro')
+         ON CONFLICT (email) DO UPDATE SET deleted_at = NULL RETURNING id`,
+        [userId],
+      )
+    }
+
+    // Ensure the personal company exists and user is its owner.
+    const { rows: co } = await pool.query<{ id: string }>(
+      `SELECT id FROM companies WHERE slug = 'personal' LIMIT 1`,
+    )
+    let companyId: string
+    if (co[0]) {
+      companyId = co[0].id
+      await pool.query(
+        `INSERT INTO company_members (company_id, user_id, role)
+         VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING`,
+        [companyId, userId],
+      )
+    } else {
+      companyId = `co-${randomUUID().slice(0, 12)}`
+      await pool.query(
+        `INSERT INTO companies (id, name, slug, owner_user_id)
+         VALUES ($1, 'My Workspace', 'personal', $2)`,
+        [companyId, userId],
+      )
+      await pool.query(
+        `INSERT INTO company_members (company_id, user_id, role)
+         VALUES ($1, $2, 'owner')`,
+        [companyId, userId],
+      )
+    }
+
+    // Seed starter agents if the company doesn't have them yet.
+    await onboardStarterAgents(companyId)
+
+    // Mirror the signed-in human into participants. ChatPane hides any
+    // message whose authorId is not in the participants store, so without
+    // this row the user's own messages POST successfully but render as
+    // zero-height and the thread looks empty.
+    await pool.query(
+      `UPDATE companies SET owner_user_id = COALESCE(owner_user_id, $2) WHERE id = $1`,
+      [companyId, userId],
+    )
+    await pool.query(
+      `INSERT INTO participants (id, kind, name, role, initial, avatar_bg, avatar_url, status, company_id)
+       VALUES ($1, 'human', 'Me', NULL, 'M', '#FF8870', $2, 'avail', $3)
+       ON CONFLICT (id, company_id) DO UPDATE
+         SET name = EXCLUDED.name, departed_at = NULL, status = 'avail'`,
+      [userId, gravatarUrlForEmail('local@cumora.dev'), companyId],
+    )
+    try { await joinAllHands({ companyId, participantId: userId }) } catch { /* best-effort */ }
+    try { await seedMemberDms({ companyId, memberId: userId }) } catch { /* best-effort */ }
+
+    // Mint session.
+    const { createSession } = await import('../auth.js')
+    const session = await createSession(userId, { ip: req.socket.remoteAddress })
+
+    res.json({
+      token: session.token,
+      user: { id: userId, email: 'local@cumora.dev', displayName: 'Me' },
+      companyId,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.warn('[auth] local-login failed:', msg)
+    res.status(500).json({ error: msg })
+  }
+}))
+
 api.post('/auth/logout', safe(async (req, res) => {
   const auth = req.headers.authorization
   let token: string | undefined

@@ -32,9 +32,11 @@ const DEV_AGENT_RUNTIME_SECRET = 'dev-agent-runtime-secret-do-not-use-in-prod'
 export const env = {
   PORT: Number(process.env.PORT ?? 5181),
   NODE_ENV: process.env.NODE_ENV ?? 'development',
+  /** Local/desktop mode — bypasses Redis, OAuth, and cloud-only workers. */
+  LOCAL_MODE: process.env.CUMORA_LOCAL_MODE === 'true',
   DATABASE_URL: required('DATABASE_URL', `postgres://${process.env.USER ?? 'postgres'}@localhost:5432/cumora`),
   REDIS_URL: required('REDIS_URL', 'redis://localhost:6379'),
-  OPENAI_API_KEY: required('OPENAI_API_KEY'),
+  OPENAI_API_KEY: required('OPENAI_API_KEY', 'local-mode-no-key'),
   /**
    * "Brain" model — the agent's main reasoning loop and convene speech.
    * Default model used when an agent's `participants.model` is NULL.
@@ -248,7 +250,8 @@ export const env = {
    * app pointing at https://api.cumora.ai). Use `*` to allow any
    * origin (no credentials).
    */
-  CORS_ORIGINS: (process.env.CUMORA_CORS_ORIGINS ?? '')
+  CORS_ORIGINS: (process.env.CUMORA_CORS_ORIGINS
+      ?? (process.env.CUMORA_LOCAL_MODE === 'true' ? '*' : ''))
     .split(',').map((s) => s.trim()).filter(Boolean),
   /**
    * OAuth providers (Google + GitHub). Set the four creds below + the two
@@ -443,7 +446,7 @@ export const env = {
 // JWT with a value anyone can read in the repo — a full agent/tenant
 // impersonation bypass. Fail closed, loudly, at startup rather than serve
 // forgeable tokens.
-if (env.NODE_ENV === 'production') {
+if (env.NODE_ENV === 'production' && !env.LOCAL_MODE) {
   if (env.AGENT_RUNTIME_SECRET === DEV_AGENT_RUNTIME_SECRET) {
     console.error(
       '[env] AGENT_RUNTIME_SECRET is still the dev default in production. ' +

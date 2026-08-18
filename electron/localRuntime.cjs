@@ -138,9 +138,9 @@ function startOwnedDaemon(options = {}) {
   const argv = [cli, 'agent', 'computer']
   if (options.pairCode) {
     argv.push('--pair', String(options.pairCode))
-    if (options.serverUrl) argv.push('--server', options.serverUrl)
     if (options.engine) argv.push('--engine', options.engine)
   }
+  if (options.serverUrl) argv.push('--server', options.serverUrl)
 
   lastError = null
   recentLines = []
@@ -412,6 +412,33 @@ ipcMain.handle('runtime:stop-local', () => {
 })
 
 app.whenReady().then(() => {
+  // In local mode, wait for the local server to be ready before starting
+  // the daemon — otherwise the daemon's first sync attempt hits a dead port.
+  if (process.env.CUMORA_LOCAL_MODE === 'true') {
+    const checkReady = async (attempts = 0) => {
+      if (attempts > 60) { // 30s timeout
+        console.log('[local-runtime] server not ready after 30s, starting daemon anyway')
+        try { startOwnedDaemon({ serverUrl: 'http://localhost:5181' }) }
+        catch (err) { lastError = err instanceof Error ? err.message : String(err) }
+        return
+      }
+      try {
+        const res = await fetch('http://localhost:5181/api/health')
+        if (res.ok) {
+          console.log('[local-runtime] local server ready, starting daemon')
+          if (pairedConfig()?.computerId && !alive()) {
+            try { startOwnedDaemon({ serverUrl: 'http://localhost:5181' }) }
+            catch (err) { lastError = err instanceof Error ? err.message : String(err) }
+          }
+          return
+        }
+      } catch { /* not ready yet */ }
+      setTimeout(() => checkReady(attempts + 1), 500)
+    }
+    void checkReady()
+    return
+  }
+
   if (pairedConfig()?.computerId && !alive()) {
     try { startOwnedDaemon() }
     catch (err) { lastError = err instanceof Error ? err.message : String(err) }

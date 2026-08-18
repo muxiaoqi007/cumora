@@ -36,12 +36,13 @@
     "migrate": "tsx server/src/migrate-bin.ts",
     "icons": "python3 scripts-make-mac-icon.py && npx -y electron-icon-builder -i build/icon.png -o build --flatten && node scripts-sync-electron-dev-icon.mjs",
     "agent-cli:build": "node agent-cli/build.mjs",
+    "server:build": "node server-build.mjs",
     "electron:dev": "npm run agent-cli:build && concurrently -k -n web,api,electron -c blue,magenta,cyan \"npm:dev\" \"npm:server:dev\" \"wait-on tcp:5180 tcp:5181 && cross-env-shell ELECTRON_RENDERER_URL=http://localhost:5180 electron .\"",
     "electron:start": "npm run agent-cli:build && electron .",
-    "electron:build": "npm run build && npm run agent-cli:build && electron-builder",
-    "electron:build:mac": "npm run build && npm run agent-cli:build && electron-builder --mac",
-    "electron:build:win": "npm run build && npm run agent-cli:build && electron-builder --win",
-    "electron:build:linux": "npm run build && npm run agent-cli:build && electron-builder --linux",
+    "electron:build": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder",
+    "electron:build:mac": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --mac",
+    "electron:build:win": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --win",
+    "electron:build:linux": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --linux",
     "mobile:sync": "npm run build && npx cap sync",
     "mobile:ios": "npm run mobile:sync && npx cap open ios",
     "mobile:ios:run": "npm run mobile:sync && npx cap run ios",
@@ -111,6 +112,8 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.5.4",
     "drizzle-kit": "^0.31.10",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
@@ -124,6 +127,10 @@
     "appId": "io.cumora.app",
     "productName": "Cumora",
     "asar": true,
+    "asarUnpack": [
+      "electron/localServer.cjs",
+      "electron/localDb.cjs"
+    ],
     "protocols": [
       {
         "name": "Cumora",
@@ -140,8 +147,18 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "agent-cli/dist", "to": "agent-cli/dist" },
-      { "from": "agent-cli/package.json", "to": "agent-cli/package.json" }
+      {
+        "from": "agent-cli/dist",
+        "to": "agent-cli/dist"
+      },
+      {
+        "from": "agent-cli/package.json",
+        "to": "agent-cli/package.json"
+      },
+      {
+        "from": "server/dist",
+        "to": "server/dist"
+      }
     ],
     "directories": {
       "output": "release",

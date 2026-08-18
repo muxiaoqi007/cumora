@@ -9,20 +9,30 @@ import { getAuthToken, getActiveCompanyId, useAuth } from '@/stores/auth'
 const DEVTOOLS_KEY = 'cumora.devtools.enabled'
 const SERVER_URL_KEY = 'cumora.serverUrl'
 
-/** Resolve the API base. Three layers, highest priority first:
+/** Resolve the API base. Layers, highest priority first:
  *    1. localStorage['cumora.serverUrl'] — runtime override, settable
  *       from the dev console: `localStorage.setItem('cumora.serverUrl',
  *       'https://api.cumora.ai')`. Lets a packaged build switch between
  *       prod and a custom endpoint without rebuilding.
- *    2. import.meta.env.VITE_CUMORA_API_BASE — baked at build time,
+ *    2. Electron desktop — always uses the local server at
+ *       http://localhost:5181 (bundled in the desktop app).
+ *    3. import.meta.env.VITE_CUMORA_API_BASE — baked at build time,
  *       e.g. .env.production points it at https://api.cumora.ai.
- *    3. '' — falls back to relative URLs, which work in Vite dev (the
+ *    4. '' — falls back to relative URLs, which work in Vite dev (the
  *       proxy rewrites /api → CUMORA_DEV_API_TARGET) and in any same-
  *       origin static deploy.
  *  Values should be the origin only, with NO trailing slash and NO
  *  `/api` suffix — the suffix is added on use, so `http(...)` and the
  *  WS / ws-ticket paths stay consistent. */
 function resolveServerOrigin(): string {
+  // Packaged desktop always talks to the in-app local server. Do this
+  // BEFORE localStorage — a leftover cumora.serverUrl from the old cloud
+  // build would send /auth/local-login at api.cumora.ai and fail with
+  // "Failed to fetch".
+  if (typeof window !== 'undefined' && window.cumora?.isElectron) {
+    try { localStorage.removeItem(SERVER_URL_KEY) } catch { /* ignore */ }
+    return 'http://127.0.0.1:5181'
+  }
   if (typeof localStorage !== 'undefined') {
     const override = localStorage.getItem(SERVER_URL_KEY)
     if (override) return override.replace(/\/+$/, '')

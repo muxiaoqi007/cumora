@@ -66,6 +66,20 @@ contextBridge.exposeInMainWorld('cumora', {
       return () => ipcRenderer.removeListener('auth:token', wrapped)
     },
   },
+  localServer: {
+    isReady: () => ipcRenderer.invoke('local-server:is-ready'),
+    wait: () => ipcRenderer.invoke('local-server:wait', 120),
+    onReady: (handler) => {
+      const wrapped = () => handler()
+      ipcRenderer.on('local-server:ready', wrapped)
+      return () => ipcRenderer.removeListener('local-server:ready', wrapped)
+    },
+    onError: (handler) => {
+      const wrapped = (_evt, error) => handler(error)
+      ipcRenderer.on('local-server:error', wrapped)
+      return () => ipcRenderer.removeListener('local-server:error', wrapped)
+    },
+  },
 
   update: {
     getAppInfo: () => ipcRenderer.invoke('update:app-info'),

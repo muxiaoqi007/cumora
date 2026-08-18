@@ -284,21 +284,36 @@ async function main() {
     }
   }
 
-  // Outbound email retry loop — reclaims transport_status='failed' rows.
-  // SKIP LOCKED keeps multi-replica deploys safe; setting
-  // EMAIL_RETRY_INTERVAL_MS=0 disables it (useful when actively testing
-  // the failed-state branch and not wanting silent recoveries).
-  startEmailRetryWorker()
+  // ─── Cloud-only workers — skipped in local/desktop mode ───
+  // In local mode we skip: email, trial sweep, shipping maintenance,
+  // k8s pod GC, chrome PVC GC, cluster monitor, and LLM rollup.
+  // These are either cloud-infrastructure-specific or multi-user only.
+  if (!env.LOCAL_MODE) {
+    startEmailRetryWorker()
+    startEmailGcWorker()
+    startTrialSweepWorker()
+    startLlmRollupRefresher()
+    startShippingMaintenance()
 
-  // Email-attachment GC — periodic sweep that deletes storage objects no
-  // longer referenced by any email_attachments row (DB CASCADE doesn't
-  // touch object storage on its own). Disabled with EMAIL_GC_INTERVAL_MS=0.
-  startEmailGcWorker()
+    if (process.env.ENABLE_AGENT_POD_GC !== 'false') {
+      startCompletedPodGc()
+      console.log('[boot] agent-pod GC running every 60s')
+    }
+
+    if (process.env.ENABLE_CHROME_PVC_GC !== 'false') {
+      startChromeProfilePvcGc({
+        intervalMs: env.CHROME_PVC_GC_INTERVAL_MS,
+        idleThresholdMs: env.CHROME_PVC_GC_IDLE_DAYS * 24 * 60 * 60_000,
+      })
+    }
+
+    if (process.env.ENABLE_CLUSTER_MONITOR !== 'false') {
+      startClusterFuseMonitor()
+      console.log('[boot] cluster fuse-pressure monitor running every 60s')
+    }
+  }
+
   startDbGcWorker()
-
-  // Mobile Pro-trial expiry — hourly sweep that downgrades lapsed trials
-  // back to free (mirrors sub2api via the same path the admin UI uses).
-  startTrialSweepWorker()
 
   // Calendar dispatcher — once a minute, scan calendar_events for due
   // occurrences and post the scheduled prompt into the target conversation
@@ -311,50 +326,6 @@ async function main() {
   // racing replica seeing the same row finds closedAt already set and
   // bails idempotently.
   startPollExpirationSweeper(env.POLL_SWEEP_INTERVAL_MS)
-
-  // Observability pre-aggregation refresher — keeps llm_calls_rollup current
-  // so the admin Observability page reads ~30k hourly buckets (~230ms) instead
-  // of scanning the whole 470k-row llm_calls table 6× per load (5-25s). First
-  // tick backfills; steady-state upserts the recent few hours. Advisory-locked
-  // so one replica refreshes. LLM_ROLLUP_INTERVAL_MS=0 disables.
-  startLlmRollupRefresher()
-
-  // Product shipping loop maintenance — promotes missed production
-  // readbacks to visible overdue friction and mines repeated agent completion
-  // failures into deduplicated improvement signals.
-  startShippingMaintenance()
-
-  // Agent-pod garbage collection — sweep Succeeded/Failed/Unknown
-  // agent pods older than 5min. Plain Pods don't have TTL-after-
-  // finished, so without this leftover idle-exit pods accumulate
-  // indefinitely. ENABLE_AGENT_POD_GC=false disables (e.g. local dev
-  // without kubectl).
-  if (process.env.ENABLE_AGENT_POD_GC !== 'false') {
-    startCompletedPodGc()
-    console.log('[boot] agent-pod GC running every 60s')
-  }
-
-  // Chrome-profile PVC garbage collection — reclaims volumes for
-  // off-boarded agents and for agents idle > CHROME_PVC_GC_IDLE_DAYS.
-  // At $0.10/GB·month per PVC this becomes the main cost driver as
-  // the agent population grows; without it, abandoned profiles
-  // accumulate forever. ENABLE_CHROME_PVC_GC=false disables (e.g.
-  // emptyDir-mode clusters that never create PVCs in the first place).
-  if (process.env.ENABLE_CHROME_PVC_GC !== 'false') {
-    startChromeProfilePvcGc({
-      intervalMs: env.CHROME_PVC_GC_INTERVAL_MS,
-      idleThresholdMs: env.CHROME_PVC_GC_IDLE_DAYS * 24 * 60 * 60_000,
-    })
-  }
-
-  // Cluster fuse-pressure monitor — periodic check that fires
-  // notifyAlert when pending agent pods stay above 20 (or fuse
-  // utilization ≥ 95%) for 5min sustained. ENABLE_CLUSTER_MONITOR=false
-  // disables. Pairs with the FUSE admission control in ensurePod.
-  if (process.env.ENABLE_CLUSTER_MONITOR !== 'false') {
-    startClusterFuseMonitor()
-    console.log('[boot] cluster fuse-pressure monitor running every 60s')
-  }
 
   // Agent run orphan sweeper — if a pod finishes during server
   // rolling restart / NEG cutover, its final /runtime/runs/:id/finish
@@ -408,7 +379,18 @@ process.on('uncaughtException', (err) => {
   void notifyAlert({ label: 'server.uncaughtException', error: err })
 })
 
-main().catch((err) => {
-  console.error('[boot] fatal', err)
-  process.exit(1)
-})
+// When loaded as a module (Electron desktop in-process mode), export
+// main() instead of running it. When executed directly (node/tsx CLI),
+// run immediately. esbuild bundles this as CJS, so `require.main === module`
+// works; in ESM `import.meta.url === pathToFileURL(process.argv[1])` would
+// be the check, but the bundled CJS always uses `require.main`.
+const isMain = typeof require !== 'undefined' && require.main === module
+
+if (isMain) {
+  main().catch((err) => {
+    console.error('[boot] fatal', err)
+    process.exit(1)
+  })
+}
+
+export { main as startServer }
