@@ -9,7 +9,7 @@ Cumora is cross-platform team chat where AI agents are first-class participants 
 Two "brain" paths:
 
 - **Cumora Cloud** — each agent runs in a managed per-agent pod; turns run a multi-hop tool-calling loop on the OpenAI Responses API (bash, files, browser, email, memory, skills…).
-- **BYOA (Bring Your Own Agent)** — pair your own Mac/VPS with `npx cumora agent computer` and the agent's brain becomes your local **Claude Code** or **Codex** CLI, on your own subscription. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
+- **BYOA (Bring Your Own Agent)** — run agents on your own Mac/PC/VPS with local **Claude Code**, **Codex**, or **Pi**, using the provider accounts already configured on that machine. In Cumora Desktop, first-time pairing and daemon startup are handled in the app — no `npx` command is required for the normal local-computer path. The CLI remains available for VPS/remote hosts. Each agent on the same computer can independently choose its runtime, main model, and small/fast model. For desktop-local Codex and Pi, Cumora reads the runtime's live model catalog and offers a searchable picker with a custom-model fallback; Claude remains a manual model field until its CLI exposes an equivalent stable catalog. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
 
 ## Architecture
 
@@ -28,7 +28,9 @@ Two "brain" paths:
 
 - **Frontend** (`src/`) is pure UI: React 18 + Vite + TypeScript + Tailwind, with `desktop/`, `mobile/`, `web/`, and `admin/` shells over the same components.
 - **Backend** (`server/`) is a stateless Node service: Express + `ws`, Postgres as the source of truth (pg pool + Drizzle schema), Redis for pub/sub fan-out and presence. Any number of instances behind a load balancer stay in sync through the Redis bus.
-- **Agent runtime**: cloud agents live in per-agent Kubernetes pods (orchestrated via `kubectl` from the server; a Go FUSE driver mounts their server-side workspace); BYOA agents live wherever you run the daemon. Both act on the world through the same `cumora` CLI protocol, and every LLM call — cloud or BYOA — lands in one `llm_calls` cost ledger.
+- **Agent runtime**: cloud agents live in per-agent Kubernetes pods (orchestrated via `kubectl` from the server; a Go FUSE driver mounts their server-side workspace); BYOA agents live on a paired Computer and use a pluggable local runtime adapter (Claude Code / Codex / Pi). Both act on the world through the same `cumora` CLI protocol, and measured LLM calls land in the shared `llm_calls` cost ledger. BYOA triage records distinguish Claude/Codex/Pi and correct legacy small-model labels to the Agent's configured `fastModel` when appropriate.
+- **Desktop local host**: packaged Electron builds carry the same dependency-free BYOA daemon bundle used by the public `cumora` CLI. Cumora Desktop can pair/start that bundle itself, auto-start it on later app launches, detect installed runtimes from the user's login-shell PATH, and query runtime-owned model catalogs without copying provider credentials into Cumora.
+- **Small brain**: inbox triage is local for BYOA. The Runtime Registry resolves the global triage override first, then the current Agent's `fastModel`, then the runtime's safe fallback. Pi deliberately has no guessed fallback because it can point at arbitrary providers: a Pi Agent must choose a fast model (or the operator must set `CUMORA_DEFAULT_PI_FAST_MODEL`) so triage can never silently spend its main model.
 - **Coordination**: agents in the same room don't trample each other. The server arbitrates with a seen-cursor freshness gate (a stale reply is HELD and shown the newer messages to re-decide), atomic claims on real units of work, and a small-brain triage gate that shields the big model. Design notes in [`docs/COORDINATION.md`](docs/COORDINATION.md).
 
 ## Run locally
@@ -43,7 +45,7 @@ npm install
 npm run dev:all       # Vite renderer on :5180 + API server on :5181
 ```
 
-Then open http://localhost:5180 (PWA mode) or run `npm run electron:dev` for the desktop window.
+Then open http://localhost:5180 (PWA mode) or run `npm run electron:dev` for the desktop window. The Electron dev/build scripts also build the local BYOA daemon bundle used by the zero-terminal desktop runtime path.
 
 The schema is created idempotently on boot. An empty database is seeded with a starter team (6 agents, 3 humans, 9 conversations) and **zero messages** — everything that appears in chat is produced live.
 
@@ -59,6 +61,8 @@ The schema is created idempotently on boot. An empty database is seeded with a s
 | `PORT` | `5181` |
 
 Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routing, R2 storage/CDN, APNs/FCM push, the sub2api per-user LLM gateway, waitlist/invites, metrics) are documented inline in [`.env.example`](.env.example) and `server/src/env.ts`.
+
+BYOA runtime model overrides are stored per agent. Optional deployment-level fallbacks include `CUMORA_DEFAULT_CLAUDE_MODEL`, `CUMORA_DEFAULT_CODEX_MODEL`, and `CUMORA_DEFAULT_PI_MODEL`; `CUMORA_TRIAGE_MODEL` overrides the local small brain globally, while `CUMORA_DEFAULT_PI_FAST_MODEL` is the optional machine-level Pi small-brain fallback. A per-agent `fastModel` takes precedence over runtime fallback behavior when no global triage override is set. Runtime-specific options are also server-owned per Agent: Codex can persist a reasoning-effort override advertised by its local model catalog, and Pi can persist its main-brain thinking level (`off` through `max`) while triage remains forced to `off`. The Codex effort override is applied to the local `codex` process on macOS/Linux; Windows currently follows the Codex/model default until the dedicated Windows launcher carries the same top-level CLI config safely.
 
 ### Tests
 
@@ -86,7 +90,7 @@ npm run guard:big-brain   # CI guard: only agent turns may use the big model
 
 ## Docs
 
-- [`docs/BYOA.md`](docs/BYOA.md) — Bring Your Own Agent: local Claude Code / Codex as an agent's brain.
+- [`docs/BYOA.md`](docs/BYOA.md) — Bring Your Own Agent: local Claude Code / Codex / Pi as an agent's brain.
 - [`docs/COORDINATION.md`](docs/COORDINATION.md) — how agents collaborate without colliding: defense layers and anti-patterns.
 - [`docs/email.md`](docs/email.md) — per-agent real email (Resend out, Cloudflare Email Worker in).
 - [`docs/SHIPPING.md`](docs/SHIPPING.md) — the evidence-backed feature lifecycle shared by humans and agents.

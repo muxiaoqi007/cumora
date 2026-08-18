@@ -8,6 +8,7 @@ import { env } from './env.js'
 import { ensureSchemaWithBootRetry } from './db/migrate.js'
 import { seedIfEmpty } from './seed.js'
 import { api } from './api/router.js'
+import { runtimeOptionsRouter } from './api/runtime-options-router.js'
 import { storage, UPLOAD_DIR } from './storage.js'
 import { attachWebSocket, resetHumanPresenceOnBoot } from './ws.js'
 import { bootDocumentBus } from './documents/rooms.js'
@@ -20,6 +21,7 @@ import { backfillStarterAgents, backfillHumanGravatars, backfillStarterAvatars }
 import { backfillMemoryEmbeddings } from './agents/embeddings.js'
 import { startStaleAgentRunSweeper } from './agents/observability.js'
 import { sweepOfflineComputers } from './agents/computer/registry.js'
+import { ensureRuntimeOptionsSchema } from './agents/computer/runtime-options.js'
 import { sweepStaleNamespaces } from './agents/runtime/fs-namespace.js'
 import { runtimeRouter } from './agents/runtime/server.js'
 import { startCompletedPodGc, startClusterFuseMonitor, startChromeProfilePvcGc } from './agents/runtime/orchestrator.js'
@@ -37,6 +39,7 @@ import { startShippingMaintenance } from './shipping-maintenance.js'
 
 async function main() {
   await ensureSchemaWithBootRetry()
+  await ensureRuntimeOptionsSchema()
   await seedIfEmpty()
   // Promote CUMORA_ADMIN_EMAILS members to is_admin on every boot —
   // idempotent, only flips FALSE→TRUE. Demotion goes through the panel.
@@ -140,6 +143,10 @@ async function main() {
     })
     next()
   })
+  // Runtime Options is deliberately a small isolated router: human owner/admin
+  // sessions write it, and the paired computer device token may read only agents
+  // assigned to that exact machine.
+  app.use('/api', runtimeOptionsRouter)
   app.use('/api', api)
   // Per-pod agent runtime API — JWT-authed, completely separate from the
   // cookie-auth /api/* surface used by humans. See agents/runtime/server.ts.
