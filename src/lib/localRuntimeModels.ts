@@ -7,9 +7,11 @@ export interface LocalRuntimeModel {
   label: string
   provider?: string | null
   isDefault?: boolean
-  /** Runtime-advertised reasoning levels; informational until Runtime Options lands. */
+  /** Codex runtime-advertised reasoning levels for this exact model. */
   reasoningEfforts?: string[]
   defaultReasoningEffort?: string | null
+  /** Pi's catalog-level `thinking=yes` capability for this exact model. */
+  supportsThinking?: boolean
 }
 
 export type LocalRuntimeModelSource = 'codex-app-server' | 'pi-cli' | 'manual'
