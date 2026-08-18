@@ -1,41 +1,10 @@
 /**
- * Universal sub2api / cloud-LLM call ledger.
+ * Universal LLM call ledger.
  *
- * Why this exists:
- *   Before this module, only the main agent turn (`agent_runs`) and the inbox
- *   triage gate (`agent_triages`) were observable per-call. Every other sub2api
- *   spend — auto-compaction, completion-verify, steer-summary, convene
- *   speech/decision, palette, gender inference, avatar image-gen — was rolled
- *   into "part of the turn total" or wasn't recorded at all. That made it
- *   impossible to answer the question the operator actually needs:
- *
- *     "Which business purpose burned the most gpt-5.4-mini last month?"
- *
- * Design contract:
- *   1. One row in `llm_calls` per OUTBOUND model call. Every cloud LLM spend
- *      is attributable to a single `purpose` + tenant + agent + (optional) run.
- *   2. Recording is FIRE-AND-FORGET; a DB hiccup MUST NEVER fail the LLM call
- *      itself. Every error path here is caught and logged, never re-thrown.
- *   3. The PRIMARY entry point is `getTrackedLlmClient(ctx)` — it returns the
- *      same shape as `getLlmClient()` but auto-records every
- *      `responses.create`, `chat.completions.create`, and `images.generate`
- *      against the bound context. Forgetting it for a NEW callsite is caught
- *      at CI by `scripts/guard-llm-tracked.mjs`.
- *   4. Streaming calls (only the main agent turn today) can't surface final
- *      usage on the create() return — usage arrives on the stream as
- *      `response.completed.usage`. Those callsites stay on `getLlmClient()`
- *      directly AND manually call `recordLlmCall()` per hop from inside their
- *      stream consumer, where final usage is known. Same ledger row shape,
- *      different timing. The CI guard's allowlist documents these exceptions.
- *
- * What this is NOT for:
- *   - BYOA-local LLM calls (the operator's paired claude / codex CLI). Those
- *     are billed against the operator's own subscription, not Cumora's sub2api,
- *     and are already accounted for in `agent_triages` (BYOA triage rows) +
- *     `agent_runs` (BYOA turn rows) with `source='byoa-*'`. Putting them into
- *     `llm_calls` would muddy the "sub2api spend" rollup that's the whole
- *     point. If we later want a unified ledger across cloud + BYOA, that's a
- *     separate, additive widening.
+ * Cloud calls are recorded by tracked OpenAI clients; BYOA calls with provider
+ * usage are mirrored by the paired daemon. Every row carries a business purpose,
+ * tenant/agent scope, source runtime, model and cache-aware usage when available.
+ * Recording is observability only and must never fail the underlying agent turn.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -43,15 +12,11 @@ import type OpenAI from 'openai'
 import { pool } from '../db/pool.js'
 import { getLlmClient } from '../llm.js'
 import { effectiveCostUsd, priceFor, usageFromOpenAI, EMPTY_USAGE, type TokenUsage } from './cost.js'
+import { resolveByoaTriageModel, type ByoaLlmSource } from './byoa-observability.js'
 
-/** The exhaustive set of business purposes that spend sub2api. Adding a new
- *  callsite REQUIRES adding its purpose here — that's the discipline knob that
- *  makes the ledger a complete picture. */
 export type LlmCallPurpose =
-  // Big-model real tasks (sanctioned by model-policy.ts).
   | 'agent-turn'
   | 'convene-speech'
-  // Small-model cerebellum classifiers — the gpt-5.4-mini hot path.
   | 'inbox-triage'
   | 'synthetic-wake-gate'
   | 'agenda'
@@ -59,63 +24,52 @@ export type LlmCallPurpose =
   | 'completion-verify'
   | 'steer-summary'
   | 'convene-decision'
-  // One-shot utilities (rare per call, but unaccounted before this ledger).
   | 'palette'
   | 'gender'
-  // Image generation — two distinct cost drivers:
-  //   - 'avatar-image' fires at agent CREATION (or explicit avatar regen).
-  //   - 'agent-image'  fires when an agent uses the image-gen tool mid-turn.
-  // Bundle them under one purpose makes the "why did images cost $X?" rollup
-  // impossible — they're driven by completely different actions.
   | 'avatar-image'
   | 'agent-image'
 
 export type LlmCallStatus = 'ok' | 'rate_limited' | 'timeout' | 'failed'
-export type LlmCallSource = 'cloud' | 'byoa-claude' | 'byoa-codex'
+export type LlmCallSource = 'cloud' | ByoaLlmSource
 
-/** Context bound to a tracked client. Every LLM call it makes carries this
- *  shape into the ledger. `purpose` is mandatory; everything else scopes the
- *  row to a tenant / agent / run / conversation for slice-and-dice queries. */
 export interface LlmCallContext {
   purpose: LlmCallPurpose
   companyId: string | null
   agentId?: string | null
   runId?: string | null
   conversationId?: string | null
-  /** Free-form purpose-specific labels (e.g. compaction's `historyTokensBefore`,
-   *  triage's `actionable`). Goes into the `extras` JSONB column. */
   extras?: Record<string, unknown>
 }
 
-/** A fully-resolved ledger record. Returned-shape used by both the tracked
- *  client and direct `recordLlmCall()` callers (e.g. the streaming turn). */
 export interface LlmCallRecord extends LlmCallContext {
   source?: LlmCallSource
   model: string
-  /** null/undefined → call ran but provider gave no usage (recorded as zeros,
-   *  measured=false). The cost will be 0 in that case — we never guess. */
   usage?: TokenUsage | null
   reasoningTokens?: number
   latencyMs: number
   status: LlmCallStatus
   error?: string | null
-  /** The agent-cli (npm `cumora`) version that produced this row, captured by
-   *  the daemon and sent in its `/runtime/llm-calls` / `/runtime/triage`
-   *  payload. Cloud rows (no daemon) leave it null. Used by the operator to
-   *  correlate spend / cache behaviour with a daemon release — when a new
-   *  version regresses token usage, the per-version rollup makes it visible. */
   daemonVersion?: string | null
 }
 
-/** Single INSERT into `llm_calls`. Never throws — the ledger is observability,
- *  not a hard dependency of the call path. */
+/** Single INSERT into `llm_calls`. Never throws. */
 export async function recordLlmCall(rec: LlmCallRecord): Promise<void> {
   const measured = !!rec.usage
   const usage = rec.usage ?? EMPTY_USAGE
-  // Cost is computed at insert time so the row is meaningful on its own.
-  // A later operator price change re-prices new rows only; if we later want
-  // back-fill, the breakdown is preserved so a recompute is one UPDATE away.
-  const cost = effectiveCostUsd(rec.model, usage)
+  let model = rec.model
+  // Old BYOA daemons may still report the adapter's historical small-model
+  // default instead of the Agent's configured fastModel. Apply the same guarded
+  // correction as agent_triages so both ledgers agree. A non-default reported
+  // model is preserved as a deliberate global override.
+  if (rec.purpose === 'inbox-triage' && rec.source && rec.source !== 'cloud' && rec.agentId) {
+    model = (await resolveByoaTriageModel({
+      source: rec.source,
+      agentId: rec.agentId,
+      companyId: rec.companyId,
+      reportedModel: model,
+    })) ?? model
+  }
+  const cost = effectiveCostUsd(model, usage)
   try {
     await pool.query(
       `INSERT INTO llm_calls (
@@ -129,7 +83,7 @@ export async function recordLlmCall(rec: LlmCallRecord): Promise<void> {
       [
         `llm-${randomUUID()}`,
         rec.companyId, rec.agentId ?? null, rec.runId ?? null, rec.conversationId ?? null,
-        rec.purpose, rec.source ?? 'cloud', rec.model,
+        rec.purpose, rec.source ?? 'cloud', model,
         usage.inputTokens, usage.cachedInputTokens, usage.cacheCreationTokens,
         usage.outputTokens, rec.reasoningTokens ?? 0,
         measured ? cost.usd : 0, cost.estimated, measured,
@@ -144,11 +98,6 @@ export async function recordLlmCall(rec: LlmCallRecord): Promise<void> {
   }
 }
 
-/** Classify a thrown LLM error into one of the ledger's `status` buckets.
- *  Rate-limit detection mirrors `triage-core.isRateLimited` and the inbox-triage
- *  fail-closed branch so the same kinds of failures get the same label here.
- *  Exported because streaming callsites (turn.ts) record manually and need the
- *  same classification rules. */
 export function classifyLlmCallError(err: unknown): LlmCallStatus {
   const status = (err as { status?: number } | null)?.status
   const msg = err instanceof Error ? err.message : String(err)
@@ -157,70 +106,38 @@ export function classifyLlmCallError(err: unknown): LlmCallStatus {
   return 'failed'
 }
 
-/** Pull final usage out of an OpenAI Responses streaming event. Streaming
- *  callsites (turn.ts: completion-verify, compaction, steer-summary, the main
- *  agent turn) consume the stream themselves and read this on every event;
- *  the LAST non-null result is the call's final usage. Returns null for events
- *  that don't carry usage (the vast majority — only `response.completed`
- *  carries the totals). */
 export function readStreamUsage(ev: { type?: string } & Record<string, unknown>): TokenUsage | null {
   if (ev.type !== 'response.completed') return null
-  // The event's `response` field is the full Response object, whose `usage`
-  // field is the same shape that non-streaming responses.create() returns —
-  // so we re-use the same mapper.
   const r = (ev as { response?: { usage?: unknown } }).response
   if (!r?.usage) return null
   return usageFromOpenAI(r.usage)
 }
 
-/** Like readStreamUsage but for `output_tokens_details.reasoning_tokens` on
- *  the completed event — surfaces non-zero reasoning spend separately. */
 export function readStreamReasoningTokens(ev: { type?: string } & Record<string, unknown>): number {
   if (ev.type !== 'response.completed') return 0
   const r = (ev as { response?: { usage?: unknown } }).response
   return r?.usage ? readReasoningTokens(r.usage) : 0
 }
 
-/** OpenAI Responses surfaces reasoning tokens (when on) under
- *  `output_tokens_details.reasoning_tokens`. NaN-safe → 0. */
 function readReasoningTokens(usage: unknown): number {
   const u = (usage ?? {}) as { output_tokens_details?: { reasoning_tokens?: number } }
   const n = Number(u.output_tokens_details?.reasoning_tokens ?? 0)
   return Number.isFinite(n) ? n : 0
 }
 
-/** Loose-typed shape we pass through; we only read `.model` / `.stream` /
- *  `.n` / `.size` to bind ledger context — we don't need to know the SDK's
- *  full request schema. */
 type AnyArgs = { model?: string; stream?: boolean; n?: number; size?: string } & Record<string, unknown>
 type AnyResponse = { usage?: unknown } & Record<string, unknown>
 
-/** Returns a tracked OpenAI client. Wraps `responses.create`,
- *  `chat.completions.create`, and `images.generate` so every call is recorded
- *  to `llm_calls` under `ctx.purpose`. Everything else passes through.
- *
- *  Streaming (`{ stream: true }` on responses.create): we DO NOT record from
- *  here — usage isn't on the synchronous return, it arrives on the stream.
- *  Streaming callsites (today: only the main agent turn) must call
- *  `recordLlmCall()` themselves from inside their stream consumer. This is
- *  enforced by `scripts/guard-llm-tracked.mjs` allowlist.
- */
 export async function getTrackedLlmClient(ctx: LlmCallContext): Promise<OpenAI> {
   const raw = await getLlmClient(ctx.companyId)
 
-  // Wrap an awaited create() with timing + ledger. Used by responses & chat.
   const wrapAwaited = (
     boundCreate: (args: AnyArgs, opts?: unknown) => Promise<AnyResponse>,
   ) =>
     async (args: AnyArgs, opts?: unknown): Promise<AnyResponse> => {
       const t0 = Date.now()
       const model = String(args.model ?? '<unknown>')
-      // Streaming: hand the stream back unwrapped, ledger is the caller's job.
-      // We don't even record a placeholder — duplicate rows on a failed stream
-      // (one here, one in finishAgentRun) would muddy per-purpose rollups.
-      if (args.stream === true) {
-        return await boundCreate(args, opts)
-      }
+      if (args.stream === true) return await boundCreate(args, opts)
       try {
         const r = await boundCreate(args, opts)
         void recordLlmCall({
@@ -241,10 +158,6 @@ export async function getTrackedLlmClient(ctx: LlmCallContext): Promise<OpenAI> 
       }
     }
 
-  // Images don't surface token usage; we still record latency/status + tag
-  // `extras.n` / `extras.size` so per-image spend is countable (cost is
-  // resolved by image-model rate in cost.ts, currently 0 since we haven't
-  // seeded image prices — a known gap, flagged via cost_estimated=true).
   const wrapImagesGenerate = (
     boundGenerate: (args: AnyArgs, opts?: unknown) => Promise<AnyResponse>,
   ) =>
@@ -270,10 +183,6 @@ export async function getTrackedLlmClient(ctx: LlmCallContext): Promise<OpenAI> 
       }
     }
 
-  // Layered Proxy: only the methods we care about are intercepted; everything
-  // else (e.g. embeddings, audio, beta) passes through unwrapped so adding a
-  // new SDK area doesn't require touching this file (it just won't be tracked
-  // until you teach the wrapper — and the CI guard will surface that gap).
   return new Proxy(raw, {
     get(target, prop, receiver): unknown {
       if (prop === 'responses') {
@@ -321,8 +230,6 @@ export async function getTrackedLlmClient(ctx: LlmCallContext): Promise<OpenAI> 
   })
 }
 
-/** Aggregate spend rollup by purpose, model, and source for a tenant over a
- *  time window. The PRIMARY answer the operator wants. */
 export interface LlmSpendRollupRow {
   purpose: LlmCallPurpose
   model: string
@@ -337,68 +244,41 @@ export interface LlmSpendRollupRow {
   outputTokens: number
   reasoningTokens: number
   costUsd: number
-  /** True when ANY row in the bucket used a non-verified (seeded/fallback)
-   *  price — the rollup's dollar figure is then an estimate. */
   costEstimated: boolean
-  /** Upper bound on $ savings if EVERY input token were served from cache at
-   *  the row's model rate. Aspirational (cold one-shots can't cache), but
-   *  it's the only honest "money on the table" signal — operator can sort by
-   *  it on the rollup to find the biggest optimization target. */
   savableUsd: number
 }
 
-/** A single column on the global-admin summary card row. The admin dashboard
- *  shows four of these in a hero grid: total cost, total calls, top purpose
- *  (by $), failure rate. Computed in one round-trip query. */
 export interface LlmSummary {
-  /** Inclusive lower bound used by all four numbers. */
   sinceDays: number
   totalCalls: number
   totalCostUsd: number
   totalInputTokens: number
   totalCachedInputTokens: number
   totalOutputTokens: number
-  failureRate: number          // 0..1 — calls with status != 'ok' / totalCalls
+  failureRate: number
   rateLimitedCalls: number
   topPurpose: { purpose: LlmCallPurpose; costUsd: number } | null
-  /** Distinct tenants that spent anything in the window. */
   activeTenants: number
-  /** Overall cache hit rate over the window: cachedInputTokens /
-   *  (inputTokens + cachedInputTokens). Null when there's no input traffic at
-   *  all (e.g. empty window or image-only). This is the single best
-   *  optimization knob — every cached input token costs ~10× less. */
   cacheHitRate: number | null
-  /** Upper-bound $ savings if EVERY input token were cached at the model's own
-   *  cached rate. Computed server-side so the page doesn't need the price
-   *  table. Aspirational — not every call can realistically cache (cold one-
-   *  shots like palette / gender can't), but the operator can filter and
-   *  decide. */
   savableUsd: number
 }
 
-/** One bucket of the daily trend stack — used to render the timeseries chart
- *  on the admin observability page. Token columns added so the Cache Health
- *  card can compute daily cache hit rate without a second round-trip
- *  (cachedInputTokens / (inputTokens + cachedInputTokens) per day). */
 export interface LlmTrendBucket {
-  day: string                              // YYYY-MM-DD UTC
+  day: string
   purpose: LlmCallPurpose
   costUsd: number
   calls: number
-  inputTokens: number                      // uncached portion (provider-native)
-  cachedInputTokens: number                // cache-read portion
+  inputTokens: number
+  cachedInputTokens: number
 }
 
-/** Top spenders — "which agents are the most expensive on the cloud?" */
 export interface LlmTopAgentRow {
   agentId: string | null
   companyId: string | null
   agentName: string | null
-  /** Agent portrait + colored-initial fallback, for the Top-spenders avatar. */
   agentAvatarUrl: string | null
   agentAvatarBg: string | null
   agentInitial: string | null
-  /** Human-readable company name (joined from companies); null = no match. */
   companyName: string | null
   costUsd: number
   calls: number
@@ -409,21 +289,14 @@ export interface LlmTopAgentRow {
 
 export async function getLlmSpendRollup(args: {
   companyId?: string | null
-  /** Inclusive lower bound. Default: 30 days ago. */
   sinceDays?: number
-  /** Optional model substring filter (e.g. 'gpt-5.4-mini'). Useful for
-   *  "what burned my mini?" — exactly the question this ledger was built for. */
   model?: string | null
 }): Promise<LlmSpendRollupRow[]> {
   const sinceDays = args.sinceDays ?? 30
   const params: unknown[] = [sinceDays]
-  // Reads the pre-aggregated llm_calls_rollup (hourly buckets), NOT raw
-  // llm_calls — ~30k rows vs ~470k, no full scan. `bucket_hour` is the rollup's
-  // time axis; the per-call status FILTERs became pre-summed *_calls columns.
   let where = `bucket_hour > NOW() - ($1::int * INTERVAL '1 day')`
   if (args.companyId !== undefined) {
     params.push(args.companyId)
-    // company_id IS NULL ↔ "personal-key calls"; the operator may want either.
     where += args.companyId === null ? ` AND company_id IS NULL` : ` AND company_id = $${params.length}`
   }
   if (args.model) {
@@ -459,51 +332,31 @@ export async function getLlmSpendRollup(args: {
   return rows.map((r) => {
     const inputTokens = Number(r.input_tokens)
     const cachedInputTokens = Number(r.cached_input_tokens)
-    // Savable $ = uncached_input × (full_rate − cached_rate). The gap between
-    // what we paid and what we WOULD pay if those same tokens hit the cache.
-    // Caveat: we use this row's model's published rate, so a row whose price
-    // is `estimated` makes savable estimated too. Image rows have inputTokens
-    // = 0 → savable = 0, which is the honest answer (image API doesn't
-    // surface tokens, so we can't claim there's anything to save).
     const price = priceFor(r.model)
     const gap = Math.max(0, price.inPer1M - price.cachedInPer1M)
     const savableUsd = (inputTokens * gap) / 1_000_000
     return ({
-    purpose: r.purpose as LlmCallPurpose,
-    model: r.model,
-    source: r.source as LlmCallSource,
-    calls: Number(r.calls),
-    okCalls: Number(r.ok_calls),
-    failedCalls: Number(r.failed_calls),
-    rateLimitedCalls: Number(r.rate_limited_calls),
-    inputTokens,
-    cachedInputTokens,
-    cacheCreationTokens: Number(r.cache_creation_tokens),
-    outputTokens: Number(r.output_tokens),
-    reasoningTokens: Number(r.reasoning_tokens),
-    costUsd: Number(r.cost_usd),
-    costEstimated: r.cost_estimated,
-    savableUsd,
+      purpose: r.purpose as LlmCallPurpose,
+      model: r.model,
+      source: r.source as LlmCallSource,
+      calls: Number(r.calls),
+      okCalls: Number(r.ok_calls),
+      failedCalls: Number(r.failed_calls),
+      rateLimitedCalls: Number(r.rate_limited_calls),
+      inputTokens,
+      cachedInputTokens,
+      cacheCreationTokens: Number(r.cache_creation_tokens),
+      outputTokens: Number(r.output_tokens),
+      reasoningTokens: Number(r.reasoning_tokens),
+      costUsd: Number(r.cost_usd),
+      costEstimated: r.cost_estimated,
+      savableUsd,
     })
   })
 }
 
-/** Hero KPIs for the global admin observability dashboard.
- *
- *  Reads the pre-aggregated llm_calls_rollup (~30k hourly buckets), not raw
- *  llm_calls (~470k rows, all inside the 30d window) — so this is a small
- *  aggregate, not a full seq scan. ONE pass via GROUPING SETS ((),(company_id))
- *  yields both the grand totals and the active-tenant count.
- *
- *  `topPurpose` + `savableUsd` are NOT computed here — the endpoint derives them
- *  from the `rollup` slice it already fetches in parallel (per-purpose×model
- *  with cost + per-row savable), so they cost nothing extra. Hence this returns
- *  everything EXCEPT those two; the caller assembles the full LlmSummary. */
 export async function getLlmSummary(args: { sinceDays?: number; companyId?: string | null } = {}): Promise<Omit<LlmSummary, 'topPurpose' | 'savableUsd'>> {
   const sinceDays = args.sinceDays ?? 30
-  // Optional per-tenant scope. `null` = personal-key calls; `undefined` (or
-  // omitted) = all tenants. Same semantics as getLlmSpendRollup so the page
-  // can wire ONE filter through every aggregation consistently.
   const params: unknown[] = [sinceDays]
   let scope = ''
   if (args.companyId !== undefined) {
@@ -511,12 +364,6 @@ export async function getLlmSummary(args: { sinceDays?: number; companyId?: stri
     else { params.push(args.companyId); scope = `AND company_id = $${params.length}` }
   }
   const where = `bucket_hour > NOW() - ($1::int * INTERVAL '1 day') ${scope}`
-  // Reads the pre-aggregated rollup (~30k rows), not raw llm_calls. ONE pass via
-  // GROUPING SETS ((), (company_id)): the grand-total row (is_total=1) gives
-  // every flat aggregate, the per-company rows (is_total=0, company_id NOT NULL)
-  // are COUNTED for active-tenants. GROUPING() distinguishes the super-aggregate
-  // NULL from a real NULL company_id so personal-key rows can't masquerade as a
-  // tenant. Per-call status FILTERs are now pre-summed *_calls columns.
   const { rows } = await pool.query<{
     is_total: number; company_id: string | null
     calls: string; cost_usd: string
@@ -559,11 +406,6 @@ export async function getLlmSummary(args: { sinceDays?: number; companyId?: stri
   }
 }
 
-/** Daily-bucketed cost & call counts per purpose — feeds the stacked area
- *  chart so the operator can see a spike "yesterday compaction blew up" at a
- *  glance. UTC days so the same day boundary regardless of where the operator
- *  is. Returned dense per (day, purpose) only where there's at least one
- *  call — caller can left-join to a date series if it needs zero rows. */
 export async function getLlmDailyTrend(args: { sinceDays?: number; companyId?: string | null } = {}): Promise<LlmTrendBucket[]> {
   const sinceDays = args.sinceDays ?? 30
   const params: unknown[] = [sinceDays]
@@ -572,8 +414,6 @@ export async function getLlmDailyTrend(args: { sinceDays?: number; companyId?: s
     if (args.companyId === null) scope = `AND company_id IS NULL`
     else { params.push(args.companyId); scope = `AND company_id = $${params.length}` }
   }
-  // Daily buckets roll up from the hourly rollup's bucket_hour — date_trunc to
-  // the UTC day and re-aggregate the (already-summed) hourly metrics.
   const { rows } = await pool.query<{ day: string; purpose: string; cost_usd: string; calls: string; input_tokens: string; cached_input_tokens: string }>(
     `SELECT to_char(date_trunc('day', bucket_hour AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
             purpose,
@@ -597,9 +437,6 @@ export async function getLlmDailyTrend(args: { sinceDays?: number; companyId?: s
   }))
 }
 
-/** One company that has any ledger activity in the window. Used to feed the
- *  Observability page's tenant picker — operator types into a search input
- *  and we narrow this list, no full-table COUNT(DISTINCT) on each keystroke. */
 export interface LlmTenantRow {
   companyId: string
   name: string | null
@@ -614,9 +451,6 @@ export interface LlmTenantRow {
 export async function getLlmTenants(args: { sinceDays?: number; limit?: number } = {}): Promise<LlmTenantRow[]> {
   const sinceDays = args.sinceDays ?? 30
   const limit = Math.max(1, Math.min(500, args.limit ?? 100))
-  // Aggregates the rollup (l = llm_calls_rollup), joining companies for
-  // human-readable names + slugs; activity-less companies are excluded by the
-  // inner GROUP (no rollup row → no row here).
   const { rows } = await pool.query<{
     company_id: string; name: string | null; slug: string | null; cost_usd: string; calls: string
     input_tokens: string; cached_input_tokens: string; output_tokens: string
@@ -649,9 +483,6 @@ export async function getLlmTenants(args: { sinceDays?: number; limit?: number }
   }))
 }
 
-/** Top spenders — joins agents' display names so the admin table is
- *  human-readable. Anonymous (no agent_id) calls are bucketed as one row at
- *  the bottom (e.g. avatar-image at agent creation has no agent_id yet). */
 export async function getLlmTopAgents(args: { sinceDays?: number; limit?: number; companyId?: string | null } = {}): Promise<LlmTopAgentRow[]> {
   const sinceDays = args.sinceDays ?? 30
   const limit = Math.max(1, Math.min(200, args.limit ?? 20))
@@ -707,9 +538,6 @@ export async function getLlmTopAgents(args: { sinceDays?: number; limit?: number
   }))
 }
 
-/** One raw call row, surfaced by the drill-down panel so the operator can see
- *  EXACTLY which calls drove a bucket's spend. All the fields they'd write SQL
- *  to get — incl. the extras JSONB expanded — without writing SQL. */
 export interface LlmCallRow {
   id: string
   createdAt: string
@@ -733,37 +561,22 @@ export interface LlmCallRow {
   status: LlmCallStatus
   error: string | null
   extras: Record<string, unknown> | null
-  /** agent-cli (npm cumora) version that produced this row. Cloud rows: null. */
   daemonVersion: string | null
 }
 
-/** Raw call rows for one bucket — driven by the drill-down panel.
- *
- *  Filters are an AND: every supplied filter narrows the result. Default sort
- *  is cost desc so the top of the panel is the highest-spend calls in that
- *  bucket. The hard limit (200) is the page-size ceiling; the page asks for
- *  50 by default. */
 export async function getLlmCalls(args: {
   sinceDays?: number
-  /** Tenant scope — narrow to one account. Same semantics as the rollup /
-   *  summary / trend / top-agents endpoints: `null` = personal-key calls,
-   *  `undefined` (or omitted) = all accounts. */
   companyId?: string | null
-  /** Bucket selectors — narrow to ONE rollup row. */
   purpose?: LlmCallPurpose
   model?: string | null
   source?: LlmCallSource | null
-  /** Cross-bucket selectors — for the "show me this run's trail" view. */
   runId?: string | null
   agentId?: string | null
-  /** 1..200, default 50. */
   limit?: number
-  /** 'cost' | 'latency' | 'hop' (extras->hopIndex) | 'created' (default cost). */
   sortBy?: 'cost' | 'latency' | 'hop' | 'created'
 }): Promise<LlmCallRow[]> {
   const sinceDays = args.sinceDays ?? 30
   const limit = Math.max(1, Math.min(200, args.limit ?? 50))
-  // Build the WHERE incrementally so an absent filter doesn't constrain.
   const params: unknown[] = [sinceDays]
   const where: string[] = [`l.created_at > NOW() - ($1::int * INTERVAL '1 day')`]
   const add = (clause: string, value: unknown): void => {
@@ -771,24 +584,21 @@ export async function getLlmCalls(args: {
     where.push(clause.replace('$$', `$${params.length}`))
   }
   if (args.purpose) add(`l.purpose = $$`, args.purpose)
-  if (args.model)   add(`l.model = $$`, args.model)
-  if (args.source)  add(`l.source = $$`, args.source)
-  if (args.runId)   add(`l.run_id = $$`, args.runId)
+  if (args.model) add(`l.model = $$`, args.model)
+  if (args.source) add(`l.source = $$`, args.source)
+  if (args.runId) add(`l.run_id = $$`, args.runId)
   if (args.agentId) add(`l.agent_id = $$`, args.agentId)
   if (args.companyId !== undefined) {
     if (args.companyId === null) where.push(`l.company_id IS NULL`)
     else add(`l.company_id = $$`, args.companyId)
   }
-  // The runId / agentId paths primarily want time-ordered trajectory; default
-  // them to 'created' ASC unless the caller picks something else. The bucket
-  // path defaults to 'cost' DESC so the top of the list is the heaviest call.
   const defaultSort: NonNullable<typeof args.sortBy> = (args.runId || args.agentId) ? 'created' : 'cost'
   const sortBy = args.sortBy ?? defaultSort
   const orderBy =
-    sortBy === 'cost'    ? 'l.cost_usd DESC NULLS LAST'
+    sortBy === 'cost' ? 'l.cost_usd DESC NULLS LAST'
     : sortBy === 'latency' ? 'l.latency_ms DESC NULLS LAST'
-    : sortBy === 'hop'   ? `(l.extras->>'hopIndex')::int ASC NULLS LAST, l.created_at ASC`
-    : 'l.created_at ASC' // 'created'
+    : sortBy === 'hop' ? `(l.extras->>'hopIndex')::int ASC NULLS LAST, l.created_at ASC`
+    : 'l.created_at ASC'
   params.push(limit)
   const { rows } = await pool.query<{
     id: string; created_at: string; company_id: string | null
@@ -848,10 +658,6 @@ export async function getLlmCalls(args: {
   }))
 }
 
-/** One row of the per-daemon-version rollup. Answers 'after I shipped v0.1.X,
- *  did average cost-per-hop go up?' — exactly the regression-spotter the
- *  operator needs when a release lands. Cache hit rate per version is the
- *  flip side: a release that warmed caches better will show a jump here. */
 export interface LlmDaemonVersionRow {
   daemonVersion: string
   source: LlmCallSource
@@ -861,8 +667,6 @@ export interface LlmDaemonVersionRow {
   cachedInputTokens: number
   outputTokens: number
   failureRate: number
-  /** First and last row times we saw this version in the window — useful to
-   *  see when the upgrade actually rolled out. */
   firstSeen: string
   lastSeen: string
 }
@@ -882,8 +686,6 @@ export async function getLlmDaemonVersionRollup(args: { sinceDays?: number; comp
     ok_calls: string
     first_seen: string; last_seen: string
   }>(
-    // first/last seen are bucket_hour MIN/MAX → hour-precision (fine for the
-    // relative "2h ago" display). ok_calls is pre-summed in the rollup.
     `SELECT daemon_version, source,
             SUM(calls)::text                                               AS calls,
             COALESCE(SUM(cost_usd), 0)::text                               AS cost_usd,
