@@ -128,11 +128,13 @@ async function ensurePiHome(home: string, persona: EnginePersona): Promise<void>
 
 /**
  * Cumora's generated agent bin directory is already first on PATH so the model
- * can call the `cumora` shim. Put a transparent Codex policy shim beside it:
- * it locates the REAL codex executable on the remainder of PATH, keeps the
- * original PATH for Codex/tool calls, and injects only the validated reasoning
- * override. Both `codex exec` and `codex app-server` therefore inherit the same
- * per-agent policy without editing the mature core adapter/session protocol.
+ * can call the `cumora` shim. On macOS/Linux put a transparent Codex policy shim
+ * beside it: the shim locates the REAL codex executable on the remainder of
+ * PATH and injects the validated top-level `-c model_reasoning_effort=...`
+ * override before `exec` / `app-server`. Windows intentionally does not install
+ * this shim yet; its .cmd launch path needs a dedicated stdin-safe launcher, so
+ * Windows follows Codex's runtime/model default rather than pretending the
+ * saved effort override is active.
  */
 const CODEX_POLICY_SHIM = `#!/usr/bin/env node
 'use strict'
@@ -342,7 +344,7 @@ function cachedRuntimeOptions(agentId: string | undefined): AgentRuntimeOptions 
 
 function applyCoreRuntimeOptions(env: NodeJS.ProcessEnv, options: AgentRuntimeOptions): NodeJS.ProcessEnv {
   const next = { ...env }
-  if (options.reasoningEffort) next.CUMORA_CODEX_REASONING_EFFORT = options.reasoningEffort
+  if (process.platform !== 'win32' && options.reasoningEffort) next.CUMORA_CODEX_REASONING_EFFORT = options.reasoningEffort
   else delete next.CUMORA_CODEX_REASONING_EFFORT
   return next
 }
@@ -352,25 +354,6 @@ async function classifyModel(args: EngineClassifyArgs): Promise<string | null> {
   const explicit = args.model?.trim()
   if (explicit) return explicit
   return syncedFastModel(args.env.CUMORA_AGENT_ID)
-}
-
-function runCodexOnWindowsWithEffort(
-  base: core.EngineAdapter,
-  args: EngineRunArgs,
-  effort: string,
-): Promise<EngineRunResult> {
-  // Windows core resolves the .cmd shim from process.env rather than args.env,
-  // and app-server is already disabled there. Inject the equivalent global CLI
-  // `-c` only for the synchronous spawn setup, then restore immediately. No
-  // await occurs while process.env is mutated, so another Agent cannot interleave.
-  const previous = process.env.CUMORA_CODEX_ARGS
-  const defaults = previous?.trim() || '--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check'
-  process.env.CUMORA_CODEX_ARGS = `${defaults} -c model_reasoning_effort="${effort}"`
-  try { return base.run(args) }
-  finally {
-    if (previous == null) delete process.env.CUMORA_CODEX_ARGS
-    else process.env.CUMORA_CODEX_ARGS = previous
-  }
 }
 
 /** Wrap legacy core adapters so classify/run/session paths honor Agent config. */
@@ -387,11 +370,7 @@ class ConfiguredCoreAdapter implements EngineAdapter {
   }
   async run(args: EngineRunArgs): Promise<EngineRunResult> {
     const options = this.id === 'codex' ? await syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : {}
-    const configured = { ...args, env: applyCoreRuntimeOptions(args.env, options) }
-    if (this.id === 'codex' && process.platform === 'win32' && options.reasoningEffort) {
-      return runCodexOnWindowsWithEffort(this.base, configured, options.reasoningEffort)
-    }
-    return this.base.run(configured)
+    return this.base.run({ ...args, env: applyCoreRuntimeOptions(args.env, options) })
   }
   startSession(args: EngineSessionArgs): EngineSession | null {
     if (this.id !== 'codex') return this.base.startSession?.(args) ?? null
@@ -403,14 +382,14 @@ class ConfiguredCoreAdapter implements EngineAdapter {
     return this.base.startSession?.({ ...args, env: applyCoreRuntimeOptions(args.env, options) }) ?? null
   }
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
-    const [model, options] = await Promise.all([
+    const [model] = await Promise.all([
       classifyModel(args),
       this.id === 'codex' ? syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : Promise.resolve({}),
     ])
     // Do NOT force the main-brain reasoning override into triage CLI flags; the
-    // small model owns its own cheap/default reasoning behavior. We only warm the
-    // Runtime Options cache here so the subsequent app-server session is ready.
-    return this.base.classify({ ...args, model, env: this.id === 'codex' ? args.env : applyCoreRuntimeOptions(args.env, options) })
+    // small model owns its own cheap/default reasoning behavior. The parallel
+    // options fetch only warms the cache for the subsequent big-brain session.
+    return this.base.classify({ ...args, model })
   }
   probe(args: EngineProbeArgs): Promise<EngineClassifyResult> { return this.base.probe(args) }
   probeWake(args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> { return this.base.probeWake(args) }
