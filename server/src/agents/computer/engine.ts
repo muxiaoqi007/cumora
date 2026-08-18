@@ -7,7 +7,8 @@
  * implementation. Pi is the first runtime added through this layer.
  */
 import { spawn } from 'node:child_process'
-import { access, mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as core from './engine-core.js'
 
@@ -27,7 +28,6 @@ export type EngineSession = core.EngineSession
 export type BrainHealth = core.BrainHealth
 export type WakeHealth = core.WakeHealth
 
-/** Public adapter contract widened from the core's Claude/Codex-only EngineId. */
 export interface EngineAdapter {
   readonly id: EngineId
   readonly bin: string
@@ -56,6 +56,8 @@ const PI_SESSION_SENTINEL = 'pi-continue'
 const MAX_FAILURE_LINES = 30
 const MAX_FAILURE_CHARS = 4000
 const ANSI_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g
+const COMPUTER_CONFIG_PATH = join(homedir(), '.cumora', 'computer.json')
+const AGENT_CONFIG_CACHE_MS = 30_000
 
 function cleanLine(line: string): string {
   return line.replace(ANSI_RE, '').replace(/\r/g, '').trim()
@@ -123,7 +125,6 @@ type PiCaptureResult = {
   error?: string
 }
 
-/** Run Pi headlessly, sending user prompts through stdin. */
 function spawnPiCapture(args: string[], opts: {
   cwd: string
   env: NodeJS.ProcessEnv
@@ -183,14 +184,67 @@ function spawnPiCapture(args: string[], opts: {
   })
 }
 
-/** Resolve Pi's small-brain model. Never fall back to Pi's main/default model. */
-function piFastModel(explicit?: string | null): string | null {
-  return explicit?.trim()
-    || process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim()
-    || null
+type SyncedAgentRuntimeConfig = { id?: string; fastModel?: string | null }
+type ComputerConfig = { serverUrl?: string; deviceToken?: string }
+
+let agentConfigCache: { at: number; rows: SyncedAgentRuntimeConfig[] } | null = null
+let agentConfigFetch: Promise<SyncedAgentRuntimeConfig[]> | null = null
+
+/**
+ * Read the same server-owned assignment/config feed the daemon syncs from.
+ *
+ * Why this lives at the registry edge for now: the legacy daemon's classify()
+ * call predates per-agent fast models and only passes its global override. Pi is
+ * the first runtime where guessing a cheap default is unsafe because any provider
+ * can be configured. The engine already receives CUMORA_AGENT_ID; using the
+ * daemon's revocable device credential lets us resolve *that agent's* fastModel
+ * without a duplicate local settings store. Cache briefly to avoid one request
+ * per inbox poll. Once daemon Runtime Config becomes first-class, this helper can
+ * disappear and classify() can receive the value directly.
+ */
+async function syncedFastModel(agentId: string | undefined): Promise<string | null> {
+  if (!agentId) return null
+  const now = Date.now()
+  if (agentConfigCache && now - agentConfigCache.at < AGENT_CONFIG_CACHE_MS) {
+    return agentConfigCache.rows.find((row) => row.id === agentId)?.fastModel?.trim() || null
+  }
+
+  if (!agentConfigFetch) {
+    agentConfigFetch = (async () => {
+      const raw = JSON.parse(await readFile(COMPUTER_CONFIG_PATH, 'utf8')) as ComputerConfig
+      const serverUrl = raw.serverUrl?.replace(/\/+$/, '')
+      const token = raw.deviceToken
+      if (!serverUrl || !token) throw new Error('Cumora computer config is missing serverUrl/deviceToken')
+      const res = await fetch(`${serverUrl}/api/computers/me/agents`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(`agent config sync HTTP ${res.status}`)
+      const data = await res.json()
+      const rows = Array.isArray(data) ? data as SyncedAgentRuntimeConfig[] : []
+      agentConfigCache = { at: Date.now(), rows }
+      return rows
+    })().finally(() => { agentConfigFetch = null })
+  }
+
+  try {
+    const rows = await agentConfigFetch
+    return rows.find((row) => row.id === agentId)?.fastModel?.trim() || null
+  } catch {
+    // A transient server/config failure must not make us fall back to a main
+    // model; caller will use the explicit deployment fallback or fail closed.
+    return null
+  }
 }
 
-/** Pi CLI adapter. */
+/** Resolve Pi's small brain, in strict precedence order. */
+async function piFastModel(args: EngineClassifyArgs): Promise<string | null> {
+  const explicit = args.model?.trim()
+  if (explicit) return explicit // daemon-wide CUMORA_TRIAGE_MODEL override
+  const perAgent = await syncedFastModel(args.env.CUMORA_AGENT_ID)
+  if (perAgent) return perAgent
+  return process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() || null
+}
+
 class PiAdapter implements EngineAdapter {
   readonly id = 'pi' as const
   readonly bin = 'pi'
@@ -201,11 +255,7 @@ class PiAdapter implements EngineAdapter {
 
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     const flags = extraArgs('CUMORA_PI_TRIAGE_ARGS')
-    const fast = piFastModel(args.model)
-    // The most important invariant for Pi: triage must NEVER silently use the
-    // runtime's main/default model. Pi can host arbitrary providers, so Cumora
-    // cannot safely guess which model is cheap. Require an explicit per-agent
-    // fast model (preferred) or the deployment-level fallback.
+    const fast = await piFastModel(args)
     if (!fast && flags.length === 0) {
       return {
         text: '',
@@ -229,11 +279,14 @@ class PiAdapter implements EngineAdapter {
   }
 
   async probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    const fast = args.tier === 'small' ? piFastModel(null) : null
+    // Doctor has no agent identity, so its small-brain probe can only validate
+    // the deployment-level Pi fallback. Per-agent Fast model health is exercised
+    // by the real triage path after assignment.
+    const fast = args.tier === 'small' ? process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() : null
     if (args.tier === 'small' && !fast) {
       return {
         text: '',
-        error: 'Pi small-brain model is not configured. Set CUMORA_DEFAULT_PI_FAST_MODEL or configure a per-agent Fast model in Cumora.',
+        error: 'No global Pi fast-model fallback is configured. Per-agent Fast models may still be healthy; set CUMORA_DEFAULT_PI_FAST_MODEL to make --doctor probe Pi small-brain globally.',
       }
     }
     const model = fast ? ['--model', fast] : []
