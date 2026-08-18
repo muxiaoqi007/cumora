@@ -123,10 +123,7 @@ type PiCaptureResult = {
   error?: string
 }
 
-/**
- * Run Pi headlessly. On Windows npm global binaries are commonly `.cmd` shims,
- * so use a shell and keep the user prompt on stdin rather than in shell argv.
- */
+/** Run Pi headlessly, sending user prompts through stdin. */
 function spawnPiCapture(args: string[], opts: {
   cwd: string
   env: NodeJS.ProcessEnv
@@ -186,18 +183,14 @@ function spawnPiCapture(args: string[], opts: {
   })
 }
 
-/**
- * Pi CLI adapter.
- *
- * Phase 1 intentionally uses Pi's supported print/session CLI instead of adding
- * an SDK dependency to the standalone `cumora` daemon bundle:
- *   - `pi -p` runs a non-interactive agent turn with normal built-in tools.
- *   - `--model` accepts Pi's model id/pattern, including `provider/id`.
- *   - `--continue` resumes the most recent session for this agent's isolated cwd.
- *
- * A future persistent adapter can switch to Pi's `--mode rpc` without changing
- * the daemon/registry contract.
- */
+/** Resolve Pi's small-brain model. Never fall back to Pi's main/default model. */
+function piFastModel(explicit?: string | null): string | null {
+  return explicit?.trim()
+    || process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim()
+    || null
+}
+
+/** Pi CLI adapter. */
 class PiAdapter implements EngineAdapter {
   readonly id = 'pi' as const
   readonly bin = 'pi'
@@ -208,15 +201,22 @@ class PiAdapter implements EngineAdapter {
 
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     const flags = extraArgs('CUMORA_PI_TRIAGE_ARGS')
-    // Keep Pi's triage namespace independent of Claude/Codex's generic override:
-    // a model id valid for one provider is often invalid for another.
-    const fast = process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() || null
-    const model = fast ? ['--model', fast] : []
+    const fast = piFastModel(args.model)
+    // The most important invariant for Pi: triage must NEVER silently use the
+    // runtime's main/default model. Pi can host arbitrary providers, so Cumora
+    // cannot safely guess which model is cheap. Require an explicit per-agent
+    // fast model (preferred) or the deployment-level fallback.
+    if (!fast && flags.length === 0) {
+      return {
+        text: '',
+        error: 'Pi local triage has no fast model configured. Choose this agent\'s Fast model in Cumora or set CUMORA_DEFAULT_PI_FAST_MODEL.',
+      }
+    }
     const base = flags.length
       ? ['-p', ...flags]
       : [
           '-p', '--no-session', '--no-tools', '--no-extensions', '--no-skills',
-          '--no-prompt-templates', '--no-context-files', '--thinking', 'off', ...model,
+          '--no-prompt-templates', '--no-context-files', '--thinking', 'off', '--model', fast!,
         ]
     const r = await spawnPiCapture(base, {
       cwd: args.cwd,
@@ -229,7 +229,13 @@ class PiAdapter implements EngineAdapter {
   }
 
   async probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    const fast = args.tier === 'small' ? process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() : null
+    const fast = args.tier === 'small' ? piFastModel(null) : null
+    if (args.tier === 'small' && !fast) {
+      return {
+        text: '',
+        error: 'Pi small-brain model is not configured. Set CUMORA_DEFAULT_PI_FAST_MODEL or configure a per-agent Fast model in Cumora.',
+      }
+    }
     const model = fast ? ['--model', fast] : []
     const r = await spawnPiCapture([
       '-p', '--no-session', '--no-tools', '--no-extensions', '--no-skills',
@@ -244,16 +250,12 @@ class PiAdapter implements EngineAdapter {
   }
 
   probeWake(_args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> {
-    // Phase 1 wake path is the same `pi -p` process exercised by probe().
-    // Mark it skipped instead of presenting a redundant health check.
     return Promise.resolve({ ok: true, detail: '', skipped: true })
   }
 
   async run(args: EngineRunArgs): Promise<EngineRunResult> {
     const flags = extraArgs('CUMORA_PI_ARGS')
     const model = args.model ? ['--model', args.model] : []
-    // Only trust our own sentinel. A session id left by Claude/Codex after an
-    // engine switch must not accidentally make Pi continue an unrelated session.
     const resume = args.resumeSessionId === PI_SESSION_SENTINEL ? ['--continue'] : []
     const argv = flags.length
       ? ['-p', ...resume, ...flags]
@@ -270,8 +272,6 @@ class PiAdapter implements EngineAdapter {
     return {
       exitCode: r.exitCode,
       error: r.error,
-      // Pi stores sessions by cwd. The sentinel tells the next wake to use
-      // `--continue`; the actual provider session file remains Pi-owned.
       sessionId: r.exitCode === 0 ? PI_SESSION_SENTINEL : (args.resumeSessionId ?? null),
       model: args.model ?? null,
     }
@@ -285,7 +285,6 @@ export function getAdapter(id: EngineId): EngineAdapter {
   return core.getAdapter(id as core.EngineId) as EngineAdapter
 }
 
-/** Probe which runtimes are installed on this machine. */
 export async function detectEngines(): Promise<EngineId[]> {
   const [base, pi] = await Promise.all([
     core.detectEngines(),
@@ -312,7 +311,6 @@ async function probePiTier(tier: 'big' | 'small', cwd: string, env: NodeJS.Proce
   return { ok: true, ms, detail: result.text.trim().slice(0, 80) }
 }
 
-/** Diagnose Claude Code, Codex and Pi through one registry-facing API. */
 export async function runEngineDoctor(opts?: {
   env?: NodeJS.ProcessEnv
   timeoutMs?: number
