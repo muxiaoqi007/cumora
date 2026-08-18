@@ -17,6 +17,8 @@ const tempDirs: string[] = []
 afterEach(async () => {
   delete process.env.CUMORA_COMPUTER_CONFIG_PATH
   delete process.env.CUMORA_DEFAULT_PI_FAST_MODEL
+  delete process.env.CUMORA_CODEX_ARGS
+  delete process.env.CUMORA_CODEX_REASONING_EFFORT
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
@@ -214,8 +216,128 @@ test('local triage resolves the current agent fastModel from the daemon config f
     assert.equal(authHeader, 'Bearer device-test-token')
     const argv = await readFile(argvLog, 'utf8')
     assert.match(argv, /--model provider\/tiny-model/)
+    assert.match(argv, /--thinking off/)
     assert.match(argv, /--no-tools/)
     assert.match(argv, /--no-session/)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('Pi main brain applies the server-owned per-agent thinking level', async () => {
+  if (process.platform === 'win32') return
+
+  const root = await mkdtemp(join(tmpdir(), 'cumora-pi-thinking-'))
+  tempDirs.push(root)
+  const binDir = join(root, 'bin')
+  const home = join(root, 'home')
+  const argvLog = join(root, 'argv.log')
+  const configPath = join(root, 'computer.json')
+  await mkdir(binDir)
+  await mkdir(home)
+
+  const fakePi = join(binDir, 'pi')
+  await writeFile(fakePi, '#!/bin/sh\n' + `printf '%s\\n' "$*" >> "${argvLog}"\n` + 'cat >/dev/null\necho pi-ok\n', 'utf8')
+  await chmod(fakePi, 0o755)
+
+  let authHeader = ''
+  const server = createServer((req, res) => {
+    authHeader = String(req.headers.authorization ?? '')
+    if (req.url === '/api/agents/agent-pi-thinking/runtime-options') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ options: { thinkingLevel: 'high' } }))
+      return
+    }
+    res.writeHead(404); res.end()
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    await writeFile(configPath, JSON.stringify({
+      serverUrl: `http://127.0.0.1:${address.port}`,
+      deviceToken: 'device-options-token',
+    }), 'utf8')
+    process.env.CUMORA_COMPUTER_CONFIG_PATH = configPath
+
+    const result = await getAdapter('pi').run({
+      home,
+      prompt: 'main wake',
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        CUMORA_AGENT_ID: 'agent-pi-thinking',
+      },
+      model: 'provider/main-model',
+      fastModel: 'provider/tiny-model',
+      onLog: () => {},
+      signal: new AbortController().signal,
+    })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(authHeader, 'Bearer device-options-token')
+    const argv = await readFile(argvLog, 'utf8')
+    assert.match(argv, /--model provider\/main-model/)
+    assert.match(argv, /--thinking high/)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('Codex policy shim injects the server-owned reasoning effort into the real CLI', async () => {
+  if (process.platform === 'win32') return
+
+  const root = await mkdtemp(join(tmpdir(), 'cumora-codex-effort-'))
+  tempDirs.push(root)
+  const home = join(root, 'home')
+  const realBin = join(root, 'real-bin')
+  const argvLog = join(root, 'codex-argv.log')
+  const configPath = join(root, 'computer.json')
+  await mkdir(home)
+  await mkdir(realBin)
+
+  const fakeCodex = join(realBin, 'codex')
+  await writeFile(fakeCodex, '#!/bin/sh\n' + `printf '%s\\n' "$*" >> "${argvLog}"\n` + 'exit 0\n', 'utf8')
+  await chmod(fakeCodex, 0o755)
+
+  const server = createServer((req, res) => {
+    if (req.url === '/api/agents/agent-codex-effort/runtime-options') {
+      assert.equal(req.headers.authorization, 'Bearer codex-device-token')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ options: { reasoningEffort: 'high' } }))
+      return
+    }
+    res.writeHead(404); res.end()
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    await writeFile(configPath, JSON.stringify({
+      serverUrl: `http://127.0.0.1:${address.port}`,
+      deviceToken: 'codex-device-token',
+    }), 'utf8')
+    process.env.CUMORA_COMPUTER_CONFIG_PATH = configPath
+
+    const adapter = getAdapter('codex')
+    await adapter.seedHome(home, { id: 'agent-codex-effort', name: 'Codex Test', role: 'coder' })
+    const result = await adapter.run({
+      home,
+      prompt: 'do work',
+      env: {
+        ...process.env,
+        PATH: `${join(home, 'bin')}:${realBin}:${process.env.PATH ?? ''}`,
+        CUMORA_AGENT_ID: 'agent-codex-effort',
+      },
+      model: 'gpt-test',
+      fastModel: 'gpt-fast',
+      onLog: () => {},
+      signal: new AbortController().signal,
+    })
+    assert.equal(result.exitCode, 0)
+    const argv = await readFile(argvLog, 'utf8')
+    assert.match(argv, /-c model_reasoning_effort=.*high/)
+    assert.match(argv, /exec --model gpt-test/)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
@@ -226,8 +348,6 @@ test('Pi triage fails closed at the adapter boundary when no cheap model is conf
   tempDirs.push(root)
   const triageDir = join(root, 'triage')
   await mkdir(triageDir)
-  // No CUMORA_AGENT_ID and no deployment fallback: classify must not spawn Pi's
-  // default/main model just to make a small-brain decision.
   const result = await getAdapter('pi').classify({
     cwd: triageDir,
     prompt: 'classify this',
