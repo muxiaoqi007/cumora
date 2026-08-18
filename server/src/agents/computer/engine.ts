@@ -3,8 +3,8 @@
  *
  * The mature Claude Code / Codex implementations live unchanged in
  * `engine-core.ts`. This registry adds runtime-wide policy on top: additional
- * engines (Pi today) and per-agent small-brain model resolution shared by every
- * adapter.
+ * engines (Pi today), per-agent small-brain model resolution, and server-owned
+ * Runtime Options shared by every adapter.
  */
 import { spawn } from 'node:child_process'
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -58,6 +58,13 @@ const MAX_FAILURE_CHARS = 4000
 const ANSI_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g
 const DEFAULT_COMPUTER_CONFIG_PATH = join(homedir(), '.cumora', 'computer.json')
 const AGENT_CONFIG_CACHE_MS = 30_000
+const RUNTIME_OPTIONS_CACHE_MS = 30_000
+const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+interface AgentRuntimeOptions {
+  reasoningEffort?: string
+  thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+}
 
 function cleanLine(line: string): string {
   return line.replace(ANSI_RE, '').replace(/\r/g, '').trim()
@@ -185,9 +192,19 @@ type ComputerConfig = { serverUrl?: string; deviceToken?: string }
 
 let agentConfigCache: { at: number; rows: SyncedAgentRuntimeConfig[] } | null = null
 let agentConfigFetch: Promise<SyncedAgentRuntimeConfig[]> | null = null
+const runtimeOptionsCache = new Map<string, { at: number; options: AgentRuntimeOptions }>()
+const runtimeOptionsFetches = new Map<string, Promise<AgentRuntimeOptions>>()
 
 function computerConfigPath(): string {
   return process.env.CUMORA_COMPUTER_CONFIG_PATH?.trim() || DEFAULT_COMPUTER_CONFIG_PATH
+}
+
+async function pairedComputerConfig(): Promise<{ serverUrl: string; deviceToken: string }> {
+  const raw = JSON.parse(await readFile(computerConfigPath(), 'utf8')) as ComputerConfig
+  const serverUrl = raw.serverUrl?.replace(/\/+$/, '')
+  const deviceToken = raw.deviceToken
+  if (!serverUrl || !deviceToken) throw new Error('Cumora computer config is missing serverUrl/deviceToken')
+  return { serverUrl, deviceToken }
 }
 
 /**
@@ -206,12 +223,9 @@ async function syncedFastModel(agentId: string | undefined): Promise<string | nu
 
   if (!agentConfigFetch) {
     agentConfigFetch = (async () => {
-      const raw = JSON.parse(await readFile(computerConfigPath(), 'utf8')) as ComputerConfig
-      const serverUrl = raw.serverUrl?.replace(/\/+$/, '')
-      const token = raw.deviceToken
-      if (!serverUrl || !token) throw new Error('Cumora computer config is missing serverUrl/deviceToken')
+      const { serverUrl, deviceToken } = await pairedComputerConfig()
       const res = await fetch(`${serverUrl}/api/computers/me/agents`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${deviceToken}` },
       })
       if (!res.ok) throw new Error(`agent config sync HTTP ${res.status}`)
       const data = await res.json()
@@ -225,10 +239,59 @@ async function syncedFastModel(agentId: string | undefined): Promise<string | nu
     const rows = await agentConfigFetch
     return rows.find((row) => row.id === agentId)?.fastModel?.trim() || null
   } catch {
-    // Transient sync failure: return null so the runtime uses its safe built-in
-    // fallback (Claude/Codex) or fails closed rather than selecting a Pi main model.
     return null
   }
+}
+
+function normalizeRuntimeOptions(value: unknown): AgentRuntimeOptions {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const raw = value as Record<string, unknown>
+  const options: AgentRuntimeOptions = {}
+  if (typeof raw.reasoningEffort === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(raw.reasoningEffort.trim())) {
+    options.reasoningEffort = raw.reasoningEffort.trim()
+  }
+  if (typeof raw.thinkingLevel === 'string' && PI_THINKING_LEVELS.has(raw.thinkingLevel)) {
+    options.thinkingLevel = raw.thinkingLevel as AgentRuntimeOptions['thinkingLevel']
+  }
+  return options
+}
+
+/** Server-owned Runtime Options, readable only for this paired computer's agents. */
+async function syncedRuntimeOptions(agentId: string | undefined): Promise<AgentRuntimeOptions> {
+  if (!agentId) return {}
+  const cached = runtimeOptionsCache.get(agentId)
+  if (cached && Date.now() - cached.at < RUNTIME_OPTIONS_CACHE_MS) return cached.options
+
+  let inflight = runtimeOptionsFetches.get(agentId)
+  if (!inflight) {
+    inflight = (async () => {
+      const { serverUrl, deviceToken } = await pairedComputerConfig()
+      const res = await fetch(`${serverUrl}/api/agents/${encodeURIComponent(agentId)}/runtime-options`, {
+        headers: { Authorization: `Bearer ${deviceToken}` },
+      })
+      if (!res.ok) throw new Error(`runtime options sync HTTP ${res.status}`)
+      const data = await res.json() as { options?: unknown }
+      const options = normalizeRuntimeOptions(data.options)
+      runtimeOptionsCache.set(agentId, { at: Date.now(), options })
+      return options
+    })().finally(() => { runtimeOptionsFetches.delete(agentId) })
+    runtimeOptionsFetches.set(agentId, inflight)
+  }
+  try { return await inflight }
+  catch { return cached?.options ?? {} }
+}
+
+function cachedRuntimeOptions(agentId: string | undefined): AgentRuntimeOptions | null {
+  if (!agentId) return {}
+  const cached = runtimeOptionsCache.get(agentId)
+  return cached && Date.now() - cached.at < RUNTIME_OPTIONS_CACHE_MS ? cached.options : null
+}
+
+function applyCoreRuntimeOptions(env: NodeJS.ProcessEnv, options: AgentRuntimeOptions): NodeJS.ProcessEnv {
+  const next = { ...env }
+  if (options.reasoningEffort) next.CUMORA_CODEX_REASONING_EFFORT = options.reasoningEffort
+  else delete next.CUMORA_CODEX_REASONING_EFFORT
+  return next
 }
 
 /** Global override > per-agent setting > adapter-specific safe default. */
@@ -238,7 +301,7 @@ async function classifyModel(args: EngineClassifyArgs): Promise<string | null> {
   return syncedFastModel(args.env.CUMORA_AGENT_ID)
 }
 
-/** Wrap legacy core adapters so their classify() path also honors Agent.fastModel. */
+/** Wrap legacy core adapters so classify/run/session paths honor Agent config. */
 class ConfiguredCoreAdapter implements EngineAdapter {
   readonly id: core.EngineId
   readonly bin: string
@@ -247,11 +310,25 @@ class ConfiguredCoreAdapter implements EngineAdapter {
     this.bin = base.bin
   }
   seedHome(home: string, persona: EnginePersona): Promise<void> { return this.base.seedHome(home, persona) }
-  run(args: EngineRunArgs): Promise<EngineRunResult> { return this.base.run(args) }
-  startSession(args: EngineSessionArgs): EngineSession | null { return this.base.startSession?.(args) ?? null }
+  async run(args: EngineRunArgs): Promise<EngineRunResult> {
+    const options = this.id === 'codex' ? await syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : {}
+    return this.base.run({ ...args, env: applyCoreRuntimeOptions(args.env, options) })
+  }
+  startSession(args: EngineSessionArgs): EngineSession | null {
+    if (this.id !== 'codex') return this.base.startSession?.(args) ?? null
+    // startSession is intentionally synchronous. If this is the first agenda
+    // wake and options have not been fetched yet, fall back to one-shot run();
+    // that async path warms the cache and the next wake can use app-server.
+    const options = cachedRuntimeOptions(args.env.CUMORA_AGENT_ID)
+    if (options == null) return null
+    return this.base.startSession?.({ ...args, env: applyCoreRuntimeOptions(args.env, options) }) ?? null
+  }
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
-    const model = await classifyModel(args)
-    return this.base.classify({ ...args, model })
+    const [model, options] = await Promise.all([
+      classifyModel(args),
+      this.id === 'codex' ? syncedRuntimeOptions(args.env.CUMORA_AGENT_ID) : Promise.resolve({}),
+    ])
+    return this.base.classify({ ...args, model, env: applyCoreRuntimeOptions(args.env, options) })
   }
   probe(args: EngineProbeArgs): Promise<EngineClassifyResult> { return this.base.probe(args) }
   probeWake(args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> { return this.base.probeWake(args) }
@@ -266,8 +343,9 @@ class PiAdapter implements EngineAdapter {
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     const flags = extraArgs('CUMORA_PI_TRIAGE_ARGS')
     const fast = (await classifyModel(args)) || process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() || null
-    // Pi can host arbitrary providers. Never guess that its default/main model is
-    // cheap enough for triage: no explicit/global/per-agent small model = no call.
+    // Warm Runtime Options while triage is already doing server config reads.
+    // The main Pi turn uses thinkingLevel; triage itself ALWAYS stays `off`.
+    void syncedRuntimeOptions(args.env.CUMORA_AGENT_ID)
     if (!fast && flags.length === 0) {
       return {
         text: '',
@@ -291,9 +369,6 @@ class PiAdapter implements EngineAdapter {
   }
 
   async probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    // Doctor is machine-level and has no Agent id, so small-brain health can only
-    // probe the optional deployment fallback. Real per-agent settings are tested
-    // by their actual triage calls.
     const fast = args.tier === 'small' ? process.env.CUMORA_DEFAULT_PI_FAST_MODEL?.trim() : null
     if (args.tier === 'small' && !fast) {
       return {
@@ -322,7 +397,11 @@ class PiAdapter implements EngineAdapter {
     const flags = extraArgs('CUMORA_PI_ARGS')
     const model = args.model ? ['--model', args.model] : []
     const resume = args.resumeSessionId === PI_SESSION_SENTINEL ? ['--continue'] : []
-    const argv = flags.length ? ['-p', ...resume, ...flags] : ['-p', '--approve', ...resume, ...model]
+    const options = await syncedRuntimeOptions(args.env.CUMORA_AGENT_ID)
+    const thinking = options.thinkingLevel ? ['--thinking', options.thinkingLevel] : []
+    const argv = flags.length
+      ? ['-p', ...resume, ...flags]
+      : ['-p', '--approve', ...resume, ...model, ...thinking]
     const r = await spawnPiCapture(argv, {
       cwd: args.home,
       env: args.env,
