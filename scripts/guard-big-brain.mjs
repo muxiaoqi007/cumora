@@ -12,9 +12,10 @@
  *      that asked for the big brain (handler='big' / a genuine actionable item)
  *
  * Everything else MUST use the support/small model (OPENAI_MODEL_SUPPORT /
- * supportModel() / --model haiku|gpt-5.4-mini). This script scans the source for
- * any big-model selection or engine spawn that escapes those gates and FAILS
- * (exit 1) with a P0 report. Wire it into CI (it also runs as a test).
+ * supportModel() / an engine's small-brain classify path). This script scans
+ * the source for any big-model selection or engine spawn that escapes those
+ * gates and FAILS (exit 1) with a P0 report. Wire it into CI (it also runs as a
+ * test).
  *
  * If you legitimately add a NEW real-task big-brain site, that is a conscious,
  * reviewed act: add the file to the relevant ALLOW list below.
@@ -37,9 +38,13 @@ const ALLOW = {
   // The BYOA big-brain engine spawn (adapter.run) lives ONLY in the daemon,
   // where it is gated by the local triage (handler='big').
   adapterRun: ['server/src/agents/computer/daemon.ts'],
-  // The engine adapter is the ONLY place that spawns the claude/codex binary
-  // (and it splits classify=small vs run=big internally).
-  engineSpawn: ['server/src/agents/computer/engine.ts'],
+  // Runtime 2.0 keeps the mature Claude/Codex implementations in engine-core.ts
+  // and the registry/new runtime adapters in engine.ts. These are the ONLY
+  // places allowed to spawn a provider runtime directly.
+  engineSpawn: [
+    'server/src/agents/computer/engine.ts',
+    'server/src/agents/computer/engine-core.ts',
+  ],
 }
 
 function walk(dir) {
@@ -79,9 +84,9 @@ export function lineViolations(rel, raw) {
   if (/\.run\s*\(\s*\{/.test(code) && /adapter\.run|this\.adapter\.run/.test(code) && !ALLOW.adapterRun.includes(rel)) {
     out.push('big-brain engine spawn (adapter.run) outside the gated daemon path')
   }
-  // R4 — the claude/codex binary spawned directly, outside the engine adapter.
-  if (/(?:spawn|execFile\w*|exec)\s*\(\s*['"`](claude|codex)['"`]/.test(code) && !ALLOW.engineSpawn.includes(rel)) {
-    out.push('claude/codex binary spawned outside the engine adapter (bypasses the classify=small / run=big split)')
+  // R4 — a provider runtime spawned directly, outside the engine adapter.
+  if (/(?:spawn|execFile\w*|exec)\s*\(\s*['"`](claude|codex|pi)['"`]/.test(code) && !ALLOW.engineSpawn.includes(rel)) {
+    out.push('provider runtime spawned outside the engine adapter (bypasses the classify=small / run=big split)')
   }
   return out
 }
@@ -115,7 +120,7 @@ if (isMain) {
       console.error(`      → ${v.why}\n`)
     }
     console.error('FIX one of:')
-    console.error('  • non-real task  → use the SUPPORT model (OPENAI_MODEL_SUPPORT / supportModel() / --model haiku)')
+    console.error('  • non-real task  → use the SUPPORT model (OPENAI_MODEL_SUPPORT / supportModel() / runtime classify path)')
     console.error('  • real cloud task → model: enforceModelPolicy(realTaskModel(persona.model), \'<real-task purpose>\')')
     console.error('  • legit NEW real-task big-brain site → add the file to ALLOW in scripts/guard-big-brain.mjs (reviewed)')
     console.error(`\n${violations.length} violation(s). This is a P0 — do not ship.\n`)
