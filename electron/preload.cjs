@@ -11,10 +11,6 @@ contextBridge.exposeInMainWorld('cumora', {
     node: process.versions.node,
   },
 
-  /**
-   * Native OS-level focus state of the MAIN window. Reliable substitute
-   * for `document.hasFocus()`, which can mis-report on Electron/macOS.
-   */
   app: {
     isFocused: () => ipcRenderer.invoke('app:is-focused'),
     onFocusChange: (handler) => {
@@ -24,58 +20,36 @@ contextBridge.exposeInMainWorld('cumora', {
     },
   },
 
-  /** Native Dock affordances. macOS-only in main; no-op elsewhere. */
   dock: {
     setUnreadDot: (visible) => ipcRenderer.send('dock:set-unread-dot', !!visible),
   },
 
-  /**
-   * Desktop-owned local Agent runtime host. The renderer supplies an existing
-   * Cumora pairing token; Electron starts the bundled BYOA daemon directly, so
-   * normal desktop users do not need Node/npm or a terminal command.
-   */
+  /** Desktop-owned local Agent runtime host + runtime introspection. */
   localRuntime: {
     status: () => ipcRenderer.invoke('runtime:local-status'),
     connect: (options) => ipcRenderer.invoke('runtime:connect-local', options),
+    models: (engine) => ipcRenderer.invoke('runtime:list-models', engine),
     stop: () => ipcRenderer.invoke('runtime:stop-local'),
   },
 
-  /**
-   * Notification window plumbing. Two consumers:
-   *  - the MAIN window's React app calls `notify.push(payload)` when a
-   *    new message arrives AND the window is unfocused. The Electron
-   *    main process forwards it to the dedicated notification
-   *    BrowserWindow that lives top-right on the primary display.
-   *  - the NOTIFICATION window's React app calls `notify.focusConvo(id)`
-   *    when the user clicks a toast — main process focuses the main
-   *    window and sends `focus-convo` so the React app selects the
-   *    conversation.
-   */
   notify: {
     push: (payload) => ipcRenderer.send('notification:push', payload),
     dismiss: (id) => ipcRenderer.send('notification:dismiss', id),
     focusConvo: (conversationId) => ipcRenderer.send('notification:focus-convo', conversationId),
-    /** Notification renderer → main: I have mounted, flush queued pushes. */
     ready: () => ipcRenderer.send('notification:ready'),
-    /** Notification renderer → main: first toast has painted, show me. */
     painted: () => ipcRenderer.send('notification:painted'),
-    /** Notification renderer → main: resize panel to fit content height. */
     setHeight: (h) => ipcRenderer.send('notification:set-height', h),
-    /** MAIN window subscribes — fires when notif panel is now on-screen. */
     onVisible: (handler) => {
       const wrapped = () => handler()
       ipcRenderer.on('notification:visible', wrapped)
       return () => ipcRenderer.removeListener('notification:visible', wrapped)
     },
-    /** True → window accepts clicks (toast visible); False → destroy. */
     setInteractive: (interactive) => ipcRenderer.send('notification:set-interactive', !!interactive),
-    /** Subscribed from the notification window — fires when main forwards a new toast. */
     onPush: (handler) => {
       const wrapped = (_evt, payload) => handler(payload)
       ipcRenderer.on('notification:push', wrapped)
       return () => ipcRenderer.removeListener('notification:push', wrapped)
     },
-    /** Subscribed from the MAIN window — fires when notification window asks to focus a conversation. */
     onFocusConvo: (handler) => {
       const wrapped = (_evt, conversationId) => handler(conversationId)
       ipcRenderer.on('notification:focus-convo', wrapped)
@@ -83,18 +57,8 @@ contextBridge.exposeInMainWorld('cumora', {
     },
   },
 
-  /**
-   * OAuth loopback plumbing. Sign-in opens the user's system browser
-   * via `auth.openExternal(url)`; after the provider redirects through
-   * our server to http://127.0.0.1:47823/auth/done, the loopback HTML
-   * page POSTs the token to the main process, which IPCs it here.
-   * AuthGate subscribes via `onToken` to plant the session.
-   */
   auth: {
     openExternal: (url) => ipcRenderer.invoke('auth:open-external', url),
-    // Arm a single-use nonce before opening the browser; the renderer threads
-    // it through the OAuth return URL so main can verify the inbound token was
-    // app-initiated (anti session-fixation).
     arm: () => ipcRenderer.invoke('auth:arm'),
     onToken: (handler) => {
       const wrapped = (_evt, payload) => handler(payload)
@@ -103,17 +67,6 @@ contextBridge.exposeInMainWorld('cumora', {
     },
   },
 
-  /**
-   * Auto-update bridge. Mirrors alma's pattern:
-   *   - getAppInfo() — current version + autoupdate capability flag
-   *   - getStatus()  — last broadcast status (idle / checking / available / downloading / downloaded / error)
-   *   - getInfo()    — { version, releaseNotes, releaseDate } for the
-   *                    last detected update
-   *   - check()      — fire a manual check; returns the resolved result
-   *   - download()   — start download (we set autoDownload=false so this is explicit)
-   *   - install()    — quit + install (relaunches at new version)
-   *   - onStatus()   — subscribe to status broadcasts; returns unsubscribe
-   */
   update: {
     getAppInfo: () => ipcRenderer.invoke('update:app-info'),
     getStatus: () => ipcRenderer.invoke('update:status'),
