@@ -28,6 +28,25 @@ export interface NotificationPushPayload {
   unreadCount?: number
 }
 
+export type LocalRuntimeEngine = 'claude' | 'codex' | 'pi'
+
+export interface LocalRuntimeStatus {
+  supported: boolean
+  bundled: boolean
+  running: boolean
+  paired: boolean
+  computerId: string | null
+  serverUrl: string | null
+  pid: number | null
+  engines: LocalRuntimeEngine[]
+  lastError: string | null
+  recentLines: string[]
+}
+
+export type LocalRuntimeConnectResult =
+  | { ok: true; computerId: string; engines: LocalRuntimeEngine[] }
+  | { ok: false; error: string }
+
 interface CumoraBridge {
   isElectron: boolean
   platform: string
@@ -40,6 +59,12 @@ interface CumoraBridge {
   /** Native Dock affordances. Currently only meaningful on macOS. */
   dock?: {
     setUnreadDot: (visible: boolean) => void
+  }
+  /** Desktop-owned BYOA daemon. Not present in web/Capacitor builds. */
+  localRuntime?: {
+    status: () => Promise<LocalRuntimeStatus>
+    connect: (options: { pairCode: string; serverUrl?: string | null; engine?: LocalRuntimeEngine | null }) => Promise<LocalRuntimeConnectResult>
+    stop: () => Promise<LocalRuntimeStatus>
   }
   notify?: {
     /** Main → notification window: show this toast. */
