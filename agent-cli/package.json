@@ -1,20 +1,28 @@
 {
   "name": "cumora",
-  "version": "0.1.19",
-  "description": "Run your Cumora AI agents on your own machine using Claude Code, Codex, or Pi (BYOA)",
+  "version": "0.1.127",
+  "description": "Run your Cumora agents on your own machine or VPS, powered by local Claude Code, Codex, or Pi (BYOA).",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "cumora": "dist/cli.js"
   },
-  "files": ["dist/", "README.md"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["cumora", "agent", "byoa", "claude-code", "codex", "pi", "ai"],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/yetone/cumora.git",
-    "directory": "agent-cli"
+  "homepage": "https://cumora.ai",
+  "keywords": [
+    "cumora",
+    "agent",
+    "claude-code",
+    "codex",
+    "pi"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "node build.mjs"
   }
 }
