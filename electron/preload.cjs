@@ -30,6 +30,17 @@ contextBridge.exposeInMainWorld('cumora', {
   },
 
   /**
+   * Desktop-owned local Agent runtime host. The renderer supplies an existing
+   * Cumora pairing token; Electron starts the bundled BYOA daemon directly, so
+   * normal desktop users do not need Node/npm or a terminal command.
+   */
+  localRuntime: {
+    status: () => ipcRenderer.invoke('runtime:local-status'),
+    connect: (options) => ipcRenderer.invoke('runtime:connect-local', options),
+    stop: () => ipcRenderer.invoke('runtime:stop-local'),
+  },
+
+  /**
    * Notification window plumbing. Two consumers:
    *  - the MAIN window's React app calls `notify.push(payload)` when a
    *    new message arrives AND the window is unfocused. The Electron
