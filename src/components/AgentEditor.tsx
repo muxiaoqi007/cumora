@@ -3,6 +3,7 @@ import { api, getServerOrigin, type AgentInput } from '@/api/client'
 import { isNativePlatform } from '@/lib/native'
 import { runtimeDefinition, runtimeLabel } from '@/lib/runtimeCatalog'
 import { getLocalRuntimeModelBridge, type LocalRuntimeModel } from '@/lib/localRuntimeModels'
+import { getAgentRuntimeOptions, putAgentRuntimeOptions, PI_THINKING_LEVELS, type PiThinkingLevel } from '@/lib/runtimeOptions'
 import type { LocalRuntimeStatus } from '@/lib/runtime'
 import { useParticipants } from '@/stores/participants'
 import { useComputers } from '@/stores/computers'
@@ -34,6 +35,10 @@ export function AgentEditor({ agent, onClose }: Props) {
   const [avatarBg, setAvatarBg] = useState(agent?.avatarBg ?? PALETTE[0])
   const [model, setModel] = useState(agent?.model ?? '')
   const [fastModel, setFastModel] = useState(agent?.fastModel ?? '')
+  const [reasoningEffort, setReasoningEffort] = useState('')
+  const [thinkingLevel, setThinkingLevel] = useState<PiThinkingLevel | ''>('')
+  const [runtimeOptionsBusy, setRuntimeOptionsBusy] = useState(false)
+  const [runtimeOptionsErr, setRuntimeOptionsErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [avatarUrl, setAvatarUrl] = useState<string | null>(agent?.avatarUrl ?? null)
@@ -76,6 +81,8 @@ export function AgentEditor({ agent, onClose }: Props) {
     && runtime.modelDiscovery === 'local-catalog'
     && !!localRuntimeModelBridge
     && localRuntimeStatus?.computerId === selectedComputer?.id
+  const selectedMainModel = runtimeModels.find((item) => item.id === model)
+  const codexEfforts = selectedMainModel?.reasoningEfforts ?? []
 
   useEffect(() => { void useComputers.getState().refresh() }, [])
   useEffect(() => {
@@ -86,6 +93,24 @@ export function AgentEditor({ agent, onClose }: Props) {
       .catch((e) => { if (!cancelled) setLocalRuntimeErr(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    if (!agent?.id) return
+    let cancelled = false
+    setRuntimeOptionsBusy(true)
+    setRuntimeOptionsErr(null)
+    void getAgentRuntimeOptions(agent.id)
+      .then((options) => {
+        if (cancelled) return
+        setReasoningEffort(options.reasoningEffort ?? '')
+        setThinkingLevel(options.thinkingLevel ?? '')
+      })
+      .catch((e) => {
+        if (!cancelled) setRuntimeOptionsErr(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => { if (!cancelled) setRuntimeOptionsBusy(false) })
+    return () => { cancelled = true }
+  }, [agent?.id])
 
   useEffect(() => {
     setRepairCopied(false)
@@ -161,8 +186,11 @@ export function AgentEditor({ agent, onClose }: Props) {
     if (next !== engine) {
       setModel('')
       setFastModel('')
+      setReasoningEffort('')
+      setThinkingLevel('')
       setRuntimeModels([])
       setRuntimeModelsErr(null)
+      setRuntimeOptionsErr(null)
       setCustomModelMode(false)
       setCustomFastModelMode(false)
     }
@@ -267,6 +295,12 @@ export function AgentEditor({ agent, onClose }: Props) {
       if (agentId && target && (target !== current || engineChanged)) {
         await api.assignAgentComputer(agentId, target, isByoaTarget ? engine : undefined)
       }
+      if (agentId) {
+        await putAgentRuntimeOptions(agentId, {
+          ...(isByoaTarget && engine === 'codex' && reasoningEffort.trim() ? { reasoningEffort: reasoningEffort.trim() } : {}),
+          ...(isByoaTarget && engine === 'pi' && thinkingLevel ? { thinkingLevel } : {}),
+        })
+      }
       await useParticipants.getState().load()
       await useConversations.getState().reload()
       onClose()
@@ -358,7 +392,7 @@ export function AgentEditor({ agent, onClose }: Props) {
             <div>
               <div className="text-[11px] font-bold tracking-wider uppercase text-ink-500">Runtime</div>
               <div className="text-[11.5px] text-ink-400 mt-0.5 font-display italic">
-                Choose where this agent runs, then choose its engine and model independently from the other agents.
+                Choose where this agent runs, then choose its engine, models, and runtime-specific reasoning behavior.
               </div>
             </div>
 
@@ -460,6 +494,61 @@ export function AgentEditor({ agent, onClose }: Props) {
                 />
               </Field>
             )}
+
+            {isByoa && engine === 'codex' && (
+              <Field
+                label="Reasoning effort"
+                hint={selectedMainModel?.defaultReasoningEffort
+                  ? `Model default: ${selectedMainModel.defaultReasoningEffort}. Leave Runtime default to follow the model.`
+                  : 'Per-agent Codex reasoning effort. Leave blank to follow the selected model/runtime default.'}
+              >
+                {codexEfforts.length > 0 ? (
+                  <Select
+                    ariaLabel="Codex reasoning effort"
+                    value={reasoningEffort}
+                    onValueChange={setReasoningEffort}
+                    options={[
+                      { value: '', label: selectedMainModel?.defaultReasoningEffort ? `Runtime default · ${selectedMainModel.defaultReasoningEffort}` : 'Runtime default' },
+                      ...codexEfforts.map((effort) => ({ value: effort, label: effort })),
+                      ...(reasoningEffort && !codexEfforts.includes(reasoningEffort) ? [{ value: reasoningEffort, label: `${reasoningEffort} · custom` }] : []),
+                    ]}
+                  />
+                ) : (
+                  <Input
+                    type="text"
+                    value={reasoningEffort}
+                    onChange={(e) => setReasoningEffort(e.target.value)}
+                    placeholder="Runtime default"
+                    className="font-mono"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                  />
+                )}
+              </Field>
+            )}
+
+            {isByoa && engine === 'pi' && (
+              <Field
+                label="Thinking level"
+                hint={selectedMainModel?.supportsThinking === false
+                  ? 'This Pi model catalog reports no thinking support; Runtime default is recommended.'
+                  : 'Controls Pi main-brain reasoning only. The cheap triage brain always runs with thinking off.'}
+              >
+                <Select
+                  ariaLabel="Pi thinking level"
+                  value={thinkingLevel}
+                  onValueChange={(value) => setThinkingLevel(value as PiThinkingLevel | '')}
+                  options={[
+                    { value: '', label: 'Runtime default' },
+                    ...PI_THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+                  ]}
+                />
+              </Field>
+            )}
+
+            {runtimeOptionsBusy && <div className="text-[10.5px] text-ink-400">Loading saved Runtime Options…</div>}
+            {runtimeOptionsErr && <div className="text-[11px] text-coral-deep">Runtime Options: {runtimeOptionsErr}</div>}
 
             {selectedComputerOffline && (
               <div className="rounded-[12px] p-3" style={{ background: 'var(--cloud)', border: '1px solid var(--sky-100)' }}>
@@ -615,7 +704,7 @@ export function AgentEditor({ agent, onClose }: Props) {
           <div className="flex-1" />
           <button
             onClick={submit}
-            disabled={busy || !name.trim() || !systemPrompt.trim()}
+            disabled={busy || !name.trim() || !systemPrompt.trim() || runtimeOptionsBusy}
             className="px-5 py-2 rounded-[9px] text-[12.5px] font-semibold text-white transition disabled:opacity-50"
             style={{ background: 'var(--skype)', boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)' }}
           >
