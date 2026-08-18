@@ -1,5 +1,7 @@
 import type { EngineId } from '@/types'
 
+export type RuntimeModelDiscovery = 'manual' | 'local-catalog'
+
 export interface RuntimeDefinition {
   id: EngineId
   label: string
@@ -8,19 +10,16 @@ export interface RuntimeDefinition {
   modelHint: string
   fastModelHint: string
   supportsFastModel: boolean
+  /** How AgentEditor can populate the model picker for a desktop-local runtime. */
+  modelDiscovery: RuntimeModelDiscovery
+  /** Pi has no universal cheap model; an explicit small brain prevents accidental big-model triage. */
+  requiresFastModel: boolean
 }
 
 /**
- * UI metadata for agent runtimes.
- *
- * Keep runtime presentation in one place instead of scattering
- * `engine === 'claude' ? ... : ...` branches through the product. Runtime
- * discovery still comes from the paired Computer (`availableEngines`); this
- * catalog only describes runtimes the current client knows how to present.
- *
- * Model IDs are deliberately NOT enumerated here. A runtime may add/remove
- * models independently of Cumora, so AgentEditor accepts the model identifier
- * reported/documented by that runtime and always allows a custom value.
+ * Presentation/capability metadata only. Runtime model IDs deliberately do NOT
+ * live here: Codex and Pi publish their current catalogs locally, and Claude is
+ * left as a custom model field until its CLI exposes an equivalent stable list.
  */
 export const RUNTIME_CATALOG: Record<EngineId, RuntimeDefinition> = {
   managed: {
@@ -31,6 +30,8 @@ export const RUNTIME_CATALOG: Record<EngineId, RuntimeDefinition> = {
     modelHint: 'Optional model override. Leave blank to use the workspace default.',
     fastModelHint: 'Uses Cumora Cloud support-model defaults.',
     supportsFastModel: false,
+    modelDiscovery: 'manual',
+    requiresFastModel: false,
   },
   claude: {
     id: 'claude',
@@ -38,26 +39,32 @@ export const RUNTIME_CATALOG: Record<EngineId, RuntimeDefinition> = {
     shortLabel: 'Claude',
     description: 'Local Claude Code CLI using the operator\'s existing login.',
     modelHint: 'Main Claude Code model. Leave blank to use the runtime default.',
-    fastModelHint: 'Optional faster/cheaper model used by Claude Code for auxiliary work.',
+    fastModelHint: 'Optional small/fast model for local triage and Claude auxiliary work; blank falls back to Haiku.',
     supportsFastModel: true,
+    modelDiscovery: 'manual',
+    requiresFastModel: false,
   },
   codex: {
     id: 'codex',
     label: 'Codex',
     shortLabel: 'Codex',
     description: 'Local Codex CLI using the operator\'s existing login.',
-    modelHint: 'Main Codex model. Leave blank to use the runtime default.',
-    fastModelHint: 'Optional fast-model override for lightweight local decisions when supported.',
+    modelHint: 'Choose from the models advertised by your current Codex login, or enter a custom model.',
+    fastModelHint: 'Optional small model used for local triage; blank falls back to the Cumora Codex support-model default.',
     supportsFastModel: true,
+    modelDiscovery: 'local-catalog',
+    requiresFastModel: false,
   },
   pi: {
     id: 'pi',
     label: 'Pi',
     shortLabel: 'Pi',
     description: 'Local Pi coding-agent runtime with its configured providers and models.',
-    modelHint: 'Pi model ID or provider/model. Leave blank to use Pi\'s current default.',
-    fastModelHint: 'Optional fast-model override for lightweight local decisions when supported.',
+    modelHint: 'Choose a model from Pi\'s configured providers, or enter provider/model manually.',
+    fastModelHint: 'Required: choose an explicitly cheap/small Pi model for inbox triage. Cumora will not silently use Pi\'s default main model here.',
     supportsFastModel: true,
+    modelDiscovery: 'local-catalog',
+    requiresFastModel: true,
   },
 }
 
