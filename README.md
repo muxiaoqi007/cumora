@@ -62,7 +62,7 @@ The schema is created idempotently on boot. An empty database is seeded with a s
 
 Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routing, R2 storage/CDN, APNs/FCM push, the sub2api per-user LLM gateway, waitlist/invites, metrics) are documented inline in [`.env.example`](.env.example) and `server/src/env.ts`.
 
-BYOA runtime model overrides are stored per agent. Optional deployment-level fallbacks include `CUMORA_DEFAULT_CLAUDE_MODEL`, `CUMORA_DEFAULT_CODEX_MODEL`, and `CUMORA_DEFAULT_PI_MODEL`; `CUMORA_TRIAGE_MODEL` overrides the local small brain globally, while `CUMORA_DEFAULT_PI_FAST_MODEL` is the optional machine-level Pi small-brain fallback. A per-agent `fastModel` takes precedence over runtime fallback behavior when no global triage override is set.
+BYOA runtime model overrides are stored per agent. Optional deployment-level fallbacks include `CUMORA_DEFAULT_CLAUDE_MODEL`, `CUMORA_DEFAULT_CODEX_MODEL`, and `CUMORA_DEFAULT_PI_MODEL`; `CUMORA_TRIAGE_MODEL` overrides the local small brain globally, while `CUMORA_DEFAULT_PI_FAST_MODEL` is the optional machine-level Pi small-brain fallback. A per-agent `fastModel` takes precedence over runtime fallback behavior when no global triage override is set. Codex model discovery also exposes its advertised reasoning-effort metadata to the UI; selecting/persisting a reasoning effort is intentionally deferred to the Runtime Options slice rather than being encoded into model names.
 
 ### Tests
 
