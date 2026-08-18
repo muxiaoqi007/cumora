@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import { api, getServerOrigin, type AgentInput } from '@/api/client'
 import { isNativePlatform } from '@/lib/native'
 import { runtimeDefinition, runtimeLabel } from '@/lib/runtimeCatalog'
+import { getLocalRuntimeModelBridge, type LocalRuntimeModel } from '@/lib/localRuntimeModels'
 import type { LocalRuntimeStatus } from '@/lib/runtime'
 import { useParticipants } from '@/stores/participants'
 import { useComputers } from '@/stores/computers'
 import { useConversations } from '@/stores/conversations'
 import { useAuth } from '@/stores/auth'
+import { Combobox } from '@/components/Combobox'
 import { Input } from '@/components/Input'
 import { TextArea } from '@/components/TextArea'
 import { Select } from '@/components/Select'
@@ -19,7 +21,6 @@ const PALETTE = [
 ]
 
 interface Props {
-  /** if provided, edit mode; otherwise create mode */
   agent: Participant | null
   onClose: () => void
 }
@@ -44,10 +45,12 @@ export function AgentEditor({ agent, onClose }: Props) {
   const [localRuntimeStatus, setLocalRuntimeStatus] = useState<LocalRuntimeStatus | null>(null)
   const [localRuntimeBusy, setLocalRuntimeBusy] = useState(false)
   const [localRuntimeErr, setLocalRuntimeErr] = useState<string | null>(null)
+  const [runtimeModels, setRuntimeModels] = useState<LocalRuntimeModel[]>([])
+  const [runtimeModelsBusy, setRuntimeModelsBusy] = useState(false)
+  const [runtimeModelsErr, setRuntimeModelsErr] = useState<string | null>(null)
+  const [customModelMode, setCustomModelMode] = useState(false)
+  const [customFastModelMode, setCustomFastModelMode] = useState(false)
 
-  // "Runs on" — which Computer hosts this agent. Cloud = managed engine.
-  // Free tier is BYOA-only: it has no real Cumora Cloud computer; we show a
-  // LOCKED "Cumora Cloud (Pro)" upsell instead and never default/select it.
   const activeTier = useAuth((s) => s.companies.find((c) => c.id === s.activeCompanyId)?.tier)
   const isFreeTier = activeTier === 'free'
   const computersById = useComputers((s) => s.byId)
@@ -55,7 +58,6 @@ export function AgentEditor({ agent, onClose }: Props) {
     .sort((a, b) => (a.kind === 'cloud' ? 0 : 1) - (b.kind === 'cloud' ? 0 : 1) || a.name.localeCompare(b.name))
   const cloud = computers.find((c) => c.kind === 'cloud')
   const firstByoa = computers.find((c) => c.kind !== 'cloud')
-  // Default for a NEW agent: paid → Cumora Cloud; free → first paired computer.
   const [computerId, setComputerId] = useState(agent?.computerId ?? (isFreeTier ? firstByoa?.id : cloud?.id) ?? '')
   const [engine, setEngine] = useState<EngineId>((agent?.engine as EngineId) ?? 'managed')
   const selectedComputer = computerId ? computersById[computerId] : undefined
@@ -67,7 +69,13 @@ export function AgentEditor({ agent, onClose }: Props) {
     ? `npx cumora@latest agent computer --pair ${repairCode}${origin ? ` --server ${origin}` : ''}`
     : ''
   const localRuntimeBridge = typeof window !== 'undefined' ? window.cumora?.localRuntime : undefined
+  const localRuntimeModelBridge = getLocalRuntimeModelBridge()
   const localComputerVisible = !!localRuntimeStatus?.computerId && !!computersById[localRuntimeStatus.computerId]
+  const canDiscoverModels = isByoa
+    && engine !== 'managed'
+    && runtime.modelDiscovery === 'local-catalog'
+    && !!localRuntimeModelBridge
+    && localRuntimeStatus?.computerId === selectedComputer?.id
 
   useEffect(() => { void useComputers.getState().refresh() }, [])
   useEffect(() => {
@@ -78,42 +86,85 @@ export function AgentEditor({ agent, onClose }: Props) {
       .catch((e) => { if (!cancelled) setLocalRuntimeErr(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
   }, [])
+
   useEffect(() => {
     setRepairCopied(false)
     setRepairErr(null)
     setRepairCode(null)
     if (!selectedComputerOffline || !selectedComputer) return
-
     let cancelled = false
     void api.repairComputer(selectedComputer.id)
       .then((out) => { if (!cancelled) setRepairCode(out.code) })
-      .catch((e) => {
-        if (!cancelled) setRepairErr(e instanceof Error ? e.message : String(e))
-      })
+      .catch((e) => { if (!cancelled) setRepairErr(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
   }, [selectedComputer?.id, selectedComputerOffline])
+
   useEffect(() => {
     if (!repairCopied) return
     const t = window.setTimeout(() => setRepairCopied(false), 1600)
     return () => window.clearTimeout(t)
   }, [repairCopied])
-  // Default selection once the list loads (new agents): paid → Cumora Cloud,
-  // free → the first paired computer (never cloud).
+
   useEffect(() => {
     if (computerId) return
-    if (isFreeTier && firstByoa) { setComputerId(firstByoa.id); setEngine((firstByoa.availableEngines[0] as EngineId) ?? 'claude') }
-    else if (!isFreeTier && cloud) { setComputerId(cloud.id); setEngine('managed') }
+    if (isFreeTier && firstByoa) {
+      setComputerId(firstByoa.id)
+      setEngine((firstByoa.availableEngines[0] as EngineId) ?? 'claude')
+    } else if (!isFreeTier && cloud) {
+      setComputerId(cloud.id)
+      setEngine('managed')
+    }
   }, [cloud, firstByoa, computerId, isFreeTier])
 
-  /**
-   * A participant only has one model/fastModel pair today (not one pair per
-   * runtime), so carrying a Claude model into Codex/Pi is almost certainly a
-   * configuration error. Reset the model overrides whenever the runtime changes.
-   */
+  const loadRuntimeModels = async (): Promise<void> => {
+    if (!canDiscoverModels || !localRuntimeModelBridge || engine === 'managed') return
+    setRuntimeModelsBusy(true)
+    setRuntimeModelsErr(null)
+    try {
+      const result = await localRuntimeModelBridge.models(engine)
+      if (!result.ok) throw new Error(result.error)
+      setRuntimeModels(result.models)
+      setCustomModelMode(!!model && !result.models.some((m) => m.id === model))
+      setCustomFastModelMode(!!fastModel && !result.models.some((m) => m.id === fastModel))
+    } catch (e) {
+      setRuntimeModels([])
+      setRuntimeModelsErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRuntimeModelsBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    setRuntimeModels([])
+    setRuntimeModelsErr(null)
+    setRuntimeModelsBusy(false)
+    if (!canDiscoverModels) return
+    let cancelled = false
+    setRuntimeModelsBusy(true)
+    void localRuntimeModelBridge!.models(engine as Exclude<EngineId, 'managed'>)
+      .then((result) => {
+        if (cancelled) return
+        if (!result.ok) throw new Error(result.error)
+        setRuntimeModels(result.models)
+        setCustomModelMode(!!model && !result.models.some((m) => m.id === model))
+        setCustomFastModelMode(!!fastModel && !result.models.some((m) => m.id === fastModel))
+      })
+      .catch((e) => { if (!cancelled) setRuntimeModelsErr(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { if (!cancelled) setRuntimeModelsBusy(false) })
+    return () => { cancelled = true }
+    // Deliberately keyed to host/runtime, not model text: typing a custom model
+    // must not re-run a CLI discovery process on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canDiscoverModels, engine, selectedComputer?.id, localRuntimeStatus?.computerId])
+
   const changeEngine = (next: EngineId): void => {
     if (next !== engine) {
       setModel('')
       setFastModel('')
+      setRuntimeModels([])
+      setRuntimeModelsErr(null)
+      setCustomModelMode(false)
+      setCustomFastModelMode(false)
     }
     setEngine(next)
   }
@@ -131,11 +182,6 @@ export function AgentEditor({ agent, onClose }: Props) {
     changeEngine(next)
   }
 
-  /**
-   * Desktop-only zero-terminal pairing. The server still owns the pairing token
-   * and the daemon still owns provider credentials; Electron merely starts the
-   * exact bundled daemon and waits for its real pairing acknowledgement.
-   */
   const connectThisComputer = async (): Promise<void> => {
     if (!localRuntimeBridge) return
     setLocalRuntimeBusy(true)
@@ -144,17 +190,11 @@ export function AgentEditor({ agent, onClose }: Props) {
       const status = await localRuntimeBridge.status()
       setLocalRuntimeStatus(status)
       if (!status.bundled) throw new Error('Local runtime host is missing from this Cumora Desktop build.')
-      if (status.engines.length === 0) {
-        throw new Error('No supported local runtime was detected. Install and sign in to Claude Code, Codex, or Pi, then try again.')
-      }
+      if (status.engines.length === 0) throw new Error('No supported local runtime was detected. Install and sign in to Claude Code, Codex, or Pi, then try again.')
       const pair = await api.requestPairingCode()
       const serverUrl = origin || ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? 'http://localhost:5181' : null)
       const result = await localRuntimeBridge.connect({ pairCode: pair.code, serverUrl })
       if (!result.ok) throw new Error(result.error)
-
-      // Pairing creates/reattaches the Computer server-side. Give the normal
-      // store endpoint a brief window to observe it, then select it immediately
-      // so the user can choose Claude/Codex/Pi without leaving this dialog.
       for (let i = 0; i < 24; i++) {
         await useComputers.getState().refresh()
         const c = useComputers.getState().byId[result.computerId]
@@ -180,8 +220,6 @@ export function AgentEditor({ agent, onClose }: Props) {
     setLocalRuntimeBusy(true)
     setLocalRuntimeErr(null)
     try {
-      // A repair token is bound to this exact Computer row, so reconnecting does
-      // not create a duplicate machine and all existing agent assignments stay.
       const repair = repairCode ? { code: repairCode } : await api.repairComputer(selectedComputer.id)
       const serverUrl = origin || ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? 'http://localhost:5181' : null)
       const result = await localRuntimeBridge.connect({ pairCode: repair.code, serverUrl })
@@ -195,7 +233,6 @@ export function AgentEditor({ agent, onClose }: Props) {
     }
   }
 
-  // Esc to close
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -206,22 +243,22 @@ export function AgentEditor({ agent, onClose }: Props) {
     setErr(null)
     setBusy(true)
     try {
-      const payload: AgentInput = { name, role, systemPrompt, bio, avatarBg, model: model.trim() || null, fastModel: fastModel.trim() || null }
+      if (isByoa && runtime.requiresFastModel && !fastModel.trim()) {
+        throw new Error(`${runtime.label} requires an explicit fast model for local triage. Choose a cheap/small model before saving.`)
+      }
+      const payload: AgentInput = {
+        name, role, systemPrompt, bio, avatarBg,
+        model: model.trim() || null,
+        fastModel: fastModel.trim() || null,
+      }
       let agentId = agent?.id
       if (editing) {
-        // Only send avatarUrl on change so we don't clobber it on no-op edits.
         if ((agent!.avatarUrl ?? null) !== avatarUrl) payload.avatarUrl = avatarUrl
         await api.updateAgent(agent!.id, payload)
       } else {
-        // No `id` field on create — server slugifies it from `name`
-        // and guarantees global uniqueness.
         const created = await api.createAgent(payload)
         agentId = created.id
       }
-      // Persist the host assignment when the computer OR the engine changed.
-      // (Engine lives in the same assign call; gating only on the computer
-      // would silently drop a Claude→Codex/Pi switch on the same machine.) Still
-      // skipped on a plain style edit to avoid the owner/admin-gated call.
       const target = computerId || cloud?.id
       const current = agent?.computerId ?? cloud?.id
       const targetComputer = target ? computersById[target] : undefined
@@ -247,7 +284,6 @@ export function AgentEditor({ agent, onClose }: Props) {
     setAvatarErr(null)
     setGeneratingAvatar(true)
     try {
-      // First save any pending edits so the prompt reflects what the user typed.
       await api.updateAgent(agent.id, { name, role, systemPrompt, bio, avatarBg })
       const r = await api.generateAgentAvatar(agent.id)
       setAvatarUrl(r.url)
@@ -296,21 +332,11 @@ export function AgentEditor({ agent, onClose }: Props) {
 
         <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1 min-h-0">
           <Field label="Name" hint="What teammates call them. The handle (@-mention id) is derived from this automatically.">
-            <Input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Saga"
-            />
+            <Input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Saga" />
           </Field>
 
           <Field label="Role" hint="One- or two-word title shown next to the name.">
-            <Input
-              type="text"
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              placeholder="e.g. Storyteller"
-            />
+            <Input type="text" value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Storyteller" />
           </Field>
 
           <Field label="Style (system prompt)" hint="The agent's voice, instincts, and quirks. Written in second person — the LLM reads this as 'you'.">
@@ -325,12 +351,7 @@ export function AgentEditor({ agent, onClose }: Props) {
           </Field>
 
           <Field label="Bio" hint="Optional, shown on the agent card.">
-            <TextArea
-              value={bio}
-              onChange={(e) => setBio(e.target.value)}
-              rows={2}
-              placeholder="A one-line description of what they're best at."
-            />
+            <TextArea value={bio} onChange={(e) => setBio(e.target.value)} rows={2} placeholder="A one-line description of what they're best at." />
           </Field>
 
           <div className="rounded-[14px] p-4 space-y-4" style={{ background: 'var(--sky-50)', border: '1px solid var(--sky-100)' }}>
@@ -341,20 +362,12 @@ export function AgentEditor({ agent, onClose }: Props) {
               </div>
             </div>
 
-            <Field
-              label="Runs on"
-              hint="Which computer executes this agent. Cumora Cloud is managed; a paired computer runs local runtimes using that machine's existing logins."
-            >
+            <Field label="Runs on" hint="Which computer executes this agent. Cumora Cloud is managed; a paired computer runs local runtimes using that machine's existing logins.">
               <Select
                 ariaLabel="Runs on"
                 value={computerId}
                 onValueChange={changeComputer}
                 options={[
-                  // Free tier has no real Cumora Cloud computer — filter any out
-                  // (defensive) and append a locked Pro upsell entry instead.
-                  // NOT on native: App Store Guideline 3.1.1 forbids referencing
-                  // a paid tier that isn't purchasable in-app via IAP, so the
-                  // iOS/Android builds omit the upsell entirely.
                   ...computers
                     .filter((c) => !(isFreeTier && c.kind === 'cloud'))
                     .map((c) => ({
@@ -386,9 +399,7 @@ export function AgentEditor({ agent, onClose }: Props) {
                         ))}
                       </div>
                     ) : (
-                      <div className="text-[11px] text-coral-deep mt-2">
-                        No Claude Code, Codex, or Pi runtime was detected on this computer.
-                      </div>
+                      <div className="text-[11px] text-coral-deep mt-2">No Claude Code, Codex, or Pi runtime was detected on this computer.</div>
                     )}
                   </div>
                   <button
@@ -410,56 +421,49 @@ export function AgentEditor({ agent, onClose }: Props) {
                   ariaLabel="Engine"
                   value={engine}
                   onValueChange={(v) => changeEngine(v as EngineId)}
-                  options={(selectedComputer.availableEngines.length
-                    ? selectedComputer.availableEngines
-                    : (['claude'] as EngineId[])
-                  ).map((en) => ({ value: en, label: runtimeLabel(en) }))}
+                  options={(selectedComputer.availableEngines.length ? selectedComputer.availableEngines : (['claude'] as EngineId[]))
+                    .map((en) => ({ value: en, label: runtimeLabel(en) }))}
                 />
-                <div className="text-[11.5px] text-ink-400 mt-1.5 font-display italic">
-                  {runtime.description}
-                </div>
+                <div className="text-[11.5px] text-ink-400 mt-1.5 font-display italic">{runtime.description}</div>
               </Field>
             )}
 
-            <Field
-              label={isByoa ? 'Main model' : 'Model'}
-              hint={runtime.modelHint}
-            >
-              <Input
-                type="text"
+            <Field label={isByoa ? 'Main model' : 'Model'} hint={runtime.modelHint}>
+              <RuntimeModelPicker
                 value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="Runtime default"
-                className="font-mono"
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
+                onChange={setModel}
+                models={runtimeModels}
+                busy={runtimeModelsBusy}
+                error={runtimeModelsErr}
+                customMode={customModelMode}
+                onCustomModeChange={setCustomModelMode}
+                allowDefault
+                discoveryEnabled={canDiscoverModels}
+                onRefresh={() => { void loadRuntimeModels() }}
               />
             </Field>
 
             {isByoa && runtime.supportsFastModel && (
-              <Field label="Fast model" hint={runtime.fastModelHint}>
-                <Input
-                  type="text"
+              <Field label={runtime.requiresFastModel ? 'Fast model · required' : 'Fast model'} hint={runtime.fastModelHint}>
+                <RuntimeModelPicker
                   value={fastModel}
-                  onChange={(e) => setFastModel(e.target.value)}
-                  placeholder="Runtime default"
-                  className="font-mono"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  autoCorrect="off"
+                  onChange={setFastModel}
+                  models={runtimeModels}
+                  busy={runtimeModelsBusy}
+                  error={runtimeModelsErr}
+                  customMode={customFastModelMode}
+                  onCustomModeChange={setCustomFastModelMode}
+                  allowDefault={!runtime.requiresFastModel}
+                  discoveryEnabled={canDiscoverModels}
+                  onRefresh={() => { void loadRuntimeModels() }}
+                  placeholder={runtime.requiresFastModel ? 'Choose a cheap/small model' : 'Runtime default'}
                 />
               </Field>
             )}
 
             {selectedComputerOffline && (
-              <div
-                className="rounded-[12px] p-3"
-                style={{ background: 'var(--cloud)', border: '1px solid var(--sky-100)' }}
-              >
-                <div className="text-[12px] font-semibold text-ink-900 mb-1">
-                  {selectedComputer?.name} is offline.
-                </div>
+              <div className="rounded-[12px] p-3" style={{ background: 'var(--cloud)', border: '1px solid var(--sky-100)' }}>
+                <div className="text-[12px] font-semibold text-ink-900 mb-1">{selectedComputer?.name} is offline.</div>
                 {localRuntimeBridge && localRuntimeStatus?.computerId === selectedComputer.id ? (
                   <>
                     <div className="text-[11.5px] text-ink-400 mb-2">Reconnect this desktop-managed runtime without opening a terminal.</div>
@@ -471,18 +475,14 @@ export function AgentEditor({ agent, onClose }: Props) {
                     >
                       {localRuntimeBusy ? 'Reconnecting…' : 'Reconnect in app'}
                     </button>
-                    {(localRuntimeErr || repairErr) && (
-                      <div className="text-[11px] text-coral-deep mt-2">{localRuntimeErr || repairErr}</div>
-                    )}
+                    {(localRuntimeErr || repairErr) && <div className="text-[11px] text-coral-deep mt-2">{localRuntimeErr || repairErr}</div>}
                   </>
                 ) : repairErr ? (
                   <div className="text-[11.5px] text-coral-deep bg-coral-soft rounded-[8px] p-2">{repairErr}</div>
                 ) : repairCommand ? (
                   <>
                     <div className="text-[11.5px] text-ink-400 mb-2">This is another computer. Run the reconnect command on that machine:</div>
-                    <pre className="bg-ink-900 text-cloud rounded-[9px] p-2.5 text-[11.5px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">
-                      {repairCommand}
-                    </pre>
+                    <pre className="bg-ink-900 text-cloud rounded-[9px] p-2.5 text-[11.5px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">{repairCommand}</pre>
                     <button
                       type="button"
                       onClick={() => { void navigator.clipboard?.writeText(repairCommand); setRepairCopied(true) }}
@@ -509,9 +509,7 @@ export function AgentEditor({ agent, onClose }: Props) {
                   className="w-8 h-8 rounded-full transition"
                   style={{
                     background: c,
-                    boxShadow: avatarBg === c
-                      ? '0 0 0 3px var(--cloud), 0 0 0 5px var(--skype)'
-                      : 'inset 0 0 0 1px rgba(0,0,0,0.06)',
+                    boxShadow: avatarBg === c ? '0 0 0 3px var(--cloud), 0 0 0 5px var(--skype)' : 'inset 0 0 0 1px rgba(0,0,0,0.06)',
                   }}
                   aria-label={c}
                 />
@@ -526,9 +524,7 @@ export function AgentEditor({ agent, onClose }: Props) {
               : 'Available after the agent is created. Save first, then re-open to generate.'}
           >
             <div className="flex items-center gap-4">
-              {/* Avatar preview with breathing/sparkle animation while generating */}
               <div className="relative shrink-0" style={{ width: 88, height: 88 }}>
-                {/* Soft outer glow that breathes */}
                 {generatingAvatar && (
                   <div
                     className="absolute rounded-full pointer-events-none"
@@ -541,7 +537,6 @@ export function AgentEditor({ agent, onClose }: Props) {
                     }}
                   />
                 )}
-                {/* Avatar bubble */}
                 <div
                   className="absolute inset-0 rounded-full grid place-items-center text-white font-bold text-[28px]"
                   style={{
@@ -554,11 +549,8 @@ export function AgentEditor({ agent, onClose }: Props) {
                   {avatarUrl
                     ? <img src={avatarUrl} alt={name || initial} className="absolute inset-0 w-full h-full object-cover rounded-full" />
                     : initial}
-                  {/* Diagonal shimmer sweep */}
                   {generatingAvatar && (
-                    <div
-                      className="absolute inset-0 rounded-full pointer-events-none overflow-hidden"
-                    >
+                    <div className="absolute inset-0 rounded-full pointer-events-none overflow-hidden">
                       <div
                         className="absolute"
                         style={{
@@ -570,15 +562,11 @@ export function AgentEditor({ agent, onClose }: Props) {
                     </div>
                   )}
                 </div>
-                {/* Twinkling sparkles ✦ */}
                 {generatingAvatar && (
                   <>
-                    <span className="absolute text-whisper select-none pointer-events-none"
-                      style={{ top: -2, right: 6, fontSize: 14, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0s' }}>✦</span>
-                    <span className="absolute text-skype-deep select-none pointer-events-none"
-                      style={{ bottom: 4, left: -4, fontSize: 11, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0.45s' }}>✦</span>
-                    <span className="absolute text-gold select-none pointer-events-none"
-                      style={{ top: '40%', left: -6, fontSize: 9, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0.9s' }}>✦</span>
+                    <span className="absolute text-whisper select-none pointer-events-none" style={{ top: -2, right: 6, fontSize: 14, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0s' }}>✦</span>
+                    <span className="absolute text-skype-deep select-none pointer-events-none" style={{ bottom: 4, left: -4, fontSize: 11, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0.45s' }}>✦</span>
+                    <span className="absolute text-gold select-none pointer-events-none" style={{ top: '40%', left: -6, fontSize: 9, animation: 'ae-twinkle 1.4s ease-in-out infinite', animationDelay: '0.9s' }}>✦</span>
                   </>
                 )}
               </div>
@@ -590,13 +578,7 @@ export function AgentEditor({ agent, onClose }: Props) {
                   disabled={!editing || generatingAvatar}
                   className="self-start inline-flex items-center gap-1.5 px-3.5 py-2 rounded-[10px] text-[12.5px] font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{
-                    // Hardcoded purple — this button intentionally keeps the
-                    // old AI-portrait accent, decoupled from the whisper
-                    // palette which has since moved to sage. Don't switch
-                    // back to var(--whisper) here.
-                    background: editing
-                      ? 'linear-gradient(135deg, #7C5CFF, #4A2D9E)'
-                      : 'var(--ink-100)',
+                    background: editing ? 'linear-gradient(135deg, #7C5CFF, #4A2D9E)' : 'var(--ink-100)',
                     color: editing ? 'white' : 'var(--ink-500)',
                     boxShadow: editing && !generatingAvatar ? '0 4px 12px -3px rgba(124, 92, 255, 0.45)' : 'none',
                   }}
@@ -605,9 +587,7 @@ export function AgentEditor({ agent, onClose }: Props) {
                     style={generatingAvatar ? { animation: 'ae-icon-twinkle 1.2s ease-in-out infinite', transformOrigin: 'center' } : undefined}>
                     <path d="M12 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/><path d="M19 14l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/>
                   </svg>
-                  {generatingAvatar
-                    ? <span>Painting<span className="ae-dots" /></span>
-                    : (avatarUrl ? 'Regenerate' : 'Generate with AI')}
+                  {generatingAvatar ? <span>Painting<span className="ae-dots" /></span> : (avatarUrl ? 'Regenerate' : 'Generate with AI')}
                 </button>
 
                 {generatingAvatar && (
@@ -615,46 +595,29 @@ export function AgentEditor({ agent, onClose }: Props) {
                     Composing {name || 'your agent'}'s portrait — usually 15–30s. You can keep editing other fields.
                   </div>
                 )}
-
                 {avatarUrl && !generatingAvatar && (
-                  <button
-                    type="button"
-                    onClick={() => setAvatarUrl(null)}
-                    className="self-start text-[11.5px] text-ink-500 hover:text-coral-deep transition"
-                  >clear portrait (use color block instead)</button>
+                  <button type="button" onClick={() => setAvatarUrl(null)} className="self-start text-[11.5px] text-ink-500 hover:text-coral-deep transition">
+                    clear portrait (use color block instead)
+                  </button>
                 )}
-
-                {avatarErr && (
-                  <div className="text-[11.5px] text-coral-deep bg-coral-soft py-1.5 px-2 rounded-md leading-[1.4]">
-                    {avatarErr}
-                  </div>
-                )}
+                {avatarErr && <div className="text-[11.5px] text-coral-deep bg-coral-soft py-1.5 px-2 rounded-md leading-[1.4]">{avatarErr}</div>}
               </div>
             </div>
           </Field>
 
-          {err && (
-            <div className="text-[12.5px] text-coral-deep bg-coral-soft py-2 px-3 rounded-lg">
-              {err}
-            </div>
-          )}
+          {err && <div className="text-[12.5px] text-coral-deep bg-coral-soft py-2 px-3 rounded-lg">{err}</div>}
         </div>
 
         <div className="px-6 py-4 border-t border-ink-100 flex items-center gap-2 bg-paper shrink-0">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-[9px] text-[12.5px] font-semibold text-ink-700 bg-cloud hover:bg-sky2-50 transition"
-            style={{ border: '1px solid var(--ink-100)' }}
-          >Cancel</button>
+          <button onClick={onClose} className="px-4 py-2 rounded-[9px] text-[12.5px] font-semibold text-ink-700 bg-cloud hover:bg-sky2-50 transition" style={{ border: '1px solid var(--ink-100)' }}>
+            Cancel
+          </button>
           <div className="flex-1" />
           <button
             onClick={submit}
             disabled={busy || !name.trim() || !systemPrompt.trim()}
             className="px-5 py-2 rounded-[9px] text-[12.5px] font-semibold text-white transition disabled:opacity-50"
-            style={{
-              background: 'var(--skype)',
-              boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)',
-            }}
+            style={{ background: 'var(--skype)', boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)' }}
           >
             {busy ? 'Saving…' : (editing ? 'Save changes' : 'Create agent')}
           </button>
@@ -662,42 +625,119 @@ export function AgentEditor({ agent, onClose }: Props) {
       </div>
 
       <style>{`
-        /* === avatar generation animations === */
         @keyframes ae-spin   { to { transform: rotate(360deg); } }
-        @keyframes ae-breathe {
-          0%, 100% { opacity: 0.45; transform: scale(1); }
-          50%      { opacity: 0.75; transform: scale(1.08); }
-        }
-        @keyframes ae-pop {
-          0%, 100% { transform: scale(1); }
-          40%      { transform: scale(1.04); }
-          70%      { transform: scale(0.985); }
-        }
-        @keyframes ae-sheen {
-          0%   { transform: translateX(-60%) translateY(-60%) rotate(0deg); }
-          100% { transform: translateX(60%)  translateY(60%)  rotate(0deg); }
-        }
-        @keyframes ae-twinkle {
-          0%, 100% { opacity: 0.2; transform: scale(0.7); }
-          50%      { opacity: 1;   transform: scale(1.15); }
-        }
-        @keyframes ae-icon-twinkle {
-          0%, 100% { opacity: 0.7; transform: scale(0.92); }
-          50%      { opacity: 1;   transform: scale(1.08); }
-        }
-        @keyframes ae-dot {
-          0%, 20%  { opacity: 0; }
-          50%      { opacity: 1; }
-          80%, 100%{ opacity: 0; }
-        }
-        .ae-dots::after {
-          content: '...';
-          letter-spacing: 2px;
-          display: inline-block;
-          margin-left: 2px;
-          animation: ae-dot 1.4s steps(4, end) infinite;
-        }
+        @keyframes ae-breathe { 0%, 100% { opacity: 0.45; transform: scale(1); } 50% { opacity: 0.75; transform: scale(1.08); } }
+        @keyframes ae-pop { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.04); } 70% { transform: scale(0.985); } }
+        @keyframes ae-sheen { 0% { transform: translateX(-60%) translateY(-60%) rotate(0deg); } 100% { transform: translateX(60%) translateY(60%) rotate(0deg); } }
+        @keyframes ae-twinkle { 0%, 100% { opacity: 0.2; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1.15); } }
+        @keyframes ae-icon-twinkle { 0%, 100% { opacity: 0.7; transform: scale(0.92); } 50% { opacity: 1; transform: scale(1.08); } }
+        @keyframes ae-dot { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 80%, 100% { opacity: 0; } }
+        .ae-dots::after { content: '...'; letter-spacing: 2px; display: inline-block; margin-left: 2px; animation: ae-dot 1.4s steps(4, end) infinite; }
       `}</style>
+    </div>
+  )
+}
+
+function RuntimeModelPicker({
+  value,
+  onChange,
+  models,
+  busy,
+  error,
+  customMode,
+  onCustomModeChange,
+  allowDefault,
+  discoveryEnabled,
+  onRefresh,
+  placeholder = 'Runtime default',
+}: {
+  value: string
+  onChange: (value: string) => void
+  models: LocalRuntimeModel[]
+  busy: boolean
+  error: string | null
+  customMode: boolean
+  onCustomModeChange: (value: boolean) => void
+  allowDefault: boolean
+  discoveryEnabled: boolean
+  onRefresh: () => void
+  placeholder?: string
+}) {
+  const CUSTOM = '__custom_model__'
+  const known = models.some((m) => m.id === value)
+  const useCatalog = models.length > 0
+  const choice = customMode || (!!value && !known) ? CUSTOM : value
+  const defaultModel = models.find((m) => m.isDefault)
+
+  if (!useCatalog) {
+    return (
+      <div>
+        <Input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="font-mono"
+          spellCheck={false}
+          autoCapitalize="none"
+          autoCorrect="off"
+        />
+        {discoveryEnabled && (
+          <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-ink-400">
+            <span>{busy ? 'Reading models from this computer…' : error ? `Model discovery failed: ${error}` : 'No model catalog returned.'}</span>
+            {!busy && <button type="button" onClick={onRefresh} className="text-skype-deep hover:underline">retry</button>}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const options = [
+    ...(allowDefault ? [{ value: '', label: defaultModel ? `Runtime default · ${defaultModel.label}` : 'Runtime default' }] : []),
+    ...models.map((m) => ({
+      value: m.id,
+      label: m.label === m.id ? m.id : `${m.label} · ${m.id}`,
+      hint: m.isDefault ? 'default' : (m.defaultReasoningEffort ?? undefined),
+    })),
+    { value: CUSTOM, label: 'Custom model…' },
+  ]
+
+  return (
+    <div>
+      <Combobox
+        value={choice}
+        options={options}
+        onValueChange={(next) => {
+          if (next === CUSTOM) {
+            onCustomModeChange(true)
+            onChange('')
+          } else {
+            onCustomModeChange(false)
+            onChange(next)
+          }
+        }}
+        placeholder={placeholder}
+        searchPlaceholder="Search local models…"
+        ariaLabel="Runtime model"
+        emptyText="No matching models"
+      />
+      {choice === CUSTOM && (
+        <Input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="provider/model or model id"
+          className="font-mono mt-2"
+          spellCheck={false}
+          autoCapitalize="none"
+          autoCorrect="off"
+          autoFocus
+        />
+      )}
+      <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-ink-400">
+        <span>{busy ? 'Refreshing local catalog…' : `Loaded ${models.length} model${models.length === 1 ? '' : 's'} from this computer.`}</span>
+        {!busy && <button type="button" onClick={onRefresh} className="text-skype-deep hover:underline">refresh</button>}
+      </div>
     </div>
   )
 }
