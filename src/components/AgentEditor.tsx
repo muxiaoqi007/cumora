@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, getServerOrigin, type AgentInput } from '@/api/client'
 import { isNativePlatform } from '@/lib/native'
 import { runtimeDefinition, runtimeLabel } from '@/lib/runtimeCatalog'
+import type { LocalRuntimeStatus } from '@/lib/runtime'
 import { useParticipants } from '@/stores/participants'
 import { useComputers } from '@/stores/computers'
 import { useConversations } from '@/stores/conversations'
@@ -40,6 +41,9 @@ export function AgentEditor({ agent, onClose }: Props) {
   const [repairCode, setRepairCode] = useState<string | null>(null)
   const [repairErr, setRepairErr] = useState<string | null>(null)
   const [repairCopied, setRepairCopied] = useState(false)
+  const [localRuntimeStatus, setLocalRuntimeStatus] = useState<LocalRuntimeStatus | null>(null)
+  const [localRuntimeBusy, setLocalRuntimeBusy] = useState(false)
+  const [localRuntimeErr, setLocalRuntimeErr] = useState<string | null>(null)
 
   // "Runs on" — which Computer hosts this agent. Cloud = managed engine.
   // Free tier is BYOA-only: it has no real Cumora Cloud computer; we show a
@@ -62,8 +66,18 @@ export function AgentEditor({ agent, onClose }: Props) {
   const repairCommand = repairCode
     ? `npx cumora@latest agent computer --pair ${repairCode}${origin ? ` --server ${origin}` : ''}`
     : ''
+  const localRuntimeBridge = typeof window !== 'undefined' ? window.cumora?.localRuntime : undefined
+  const localComputerVisible = !!localRuntimeStatus?.computerId && !!computersById[localRuntimeStatus.computerId]
 
   useEffect(() => { void useComputers.getState().refresh() }, [])
+  useEffect(() => {
+    if (!localRuntimeBridge) return
+    let cancelled = false
+    void localRuntimeBridge.status()
+      .then((status) => { if (!cancelled) setLocalRuntimeStatus(status) })
+      .catch((e) => { if (!cancelled) setLocalRuntimeErr(e instanceof Error ? e.message : String(e)) })
+    return () => { cancelled = true }
+  }, [])
   useEffect(() => {
     setRepairCopied(false)
     setRepairErr(null)
@@ -115,6 +129,70 @@ export function AgentEditor({ agent, onClose }: Props) {
       ? (agent!.engine as EngineId)
       : (c.availableEngines[0] ?? 'claude')
     changeEngine(next)
+  }
+
+  /**
+   * Desktop-only zero-terminal pairing. The server still owns the pairing token
+   * and the daemon still owns provider credentials; Electron merely starts the
+   * exact bundled daemon and waits for its real pairing acknowledgement.
+   */
+  const connectThisComputer = async (): Promise<void> => {
+    if (!localRuntimeBridge) return
+    setLocalRuntimeBusy(true)
+    setLocalRuntimeErr(null)
+    try {
+      const status = await localRuntimeBridge.status()
+      setLocalRuntimeStatus(status)
+      if (!status.bundled) throw new Error('Local runtime host is missing from this Cumora Desktop build.')
+      if (status.engines.length === 0) {
+        throw new Error('No supported local runtime was detected. Install and sign in to Claude Code, Codex, or Pi, then try again.')
+      }
+      const pair = await api.requestPairingCode()
+      const serverUrl = origin || ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? 'http://localhost:5181' : null)
+      const result = await localRuntimeBridge.connect({ pairCode: pair.code, serverUrl })
+      if (!result.ok) throw new Error(result.error)
+
+      // Pairing creates/reattaches the Computer server-side. Give the normal
+      // store endpoint a brief window to observe it, then select it immediately
+      // so the user can choose Claude/Codex/Pi without leaving this dialog.
+      for (let i = 0; i < 24; i++) {
+        await useComputers.getState().refresh()
+        const c = useComputers.getState().byId[result.computerId]
+        if (c) {
+          setComputerId(c.id)
+          const next = (c.availableEngines[0] ?? result.engines[0] ?? 'claude') as EngineId
+          changeEngine(next)
+          setLocalRuntimeStatus(await localRuntimeBridge.status())
+          return
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 250))
+      }
+      throw new Error('This computer paired successfully, but it has not appeared in the workspace yet. Re-open the agent editor to retry.')
+    } catch (e) {
+      setLocalRuntimeErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLocalRuntimeBusy(false)
+    }
+  }
+
+  const restartThisComputer = async (): Promise<void> => {
+    if (!localRuntimeBridge || !selectedComputer) return
+    setLocalRuntimeBusy(true)
+    setLocalRuntimeErr(null)
+    try {
+      // A repair token is bound to this exact Computer row, so reconnecting does
+      // not create a duplicate machine and all existing agent assignments stay.
+      const repair = repairCode ? { code: repairCode } : await api.repairComputer(selectedComputer.id)
+      const serverUrl = origin || ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? 'http://localhost:5181' : null)
+      const result = await localRuntimeBridge.connect({ pairCode: repair.code, serverUrl })
+      if (!result.ok) throw new Error(result.error)
+      await useComputers.getState().refresh()
+      setLocalRuntimeStatus(await localRuntimeBridge.status())
+    } catch (e) {
+      setLocalRuntimeErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLocalRuntimeBusy(false)
+    }
   }
 
   // Esc to close
@@ -291,6 +369,41 @@ export function AgentEditor({ agent, onClose }: Props) {
               />
             </Field>
 
+            {localRuntimeBridge && localRuntimeStatus && !localComputerVisible && (
+              <div className="rounded-[12px] p-3 bg-cloud" style={{ border: '1px solid var(--sky-100)' }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold text-ink-900">💻 This computer</div>
+                    <div className="text-[11.5px] text-ink-400 mt-0.5 font-display italic">
+                      Connect Cumora Desktop directly — no terminal or npx command required.
+                    </div>
+                    {localRuntimeStatus.engines.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {localRuntimeStatus.engines.map((en) => (
+                          <span key={en} className="text-[10.5px] px-2 py-0.5 rounded-full bg-sky2-50 text-ink-600" style={{ border: '1px solid var(--sky-100)' }}>
+                            {runtimeLabel(en)} detected
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-coral-deep mt-2">
+                        No Claude Code, Codex, or Pi runtime was detected on this computer.
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { void connectThisComputer() }}
+                    disabled={localRuntimeBusy || !localRuntimeStatus.bundled || localRuntimeStatus.engines.length === 0}
+                    className="shrink-0 px-3 py-2 rounded-[9px] text-[11.5px] font-semibold text-white bg-skype disabled:opacity-50 transition"
+                  >
+                    {localRuntimeBusy ? 'Connecting…' : (localRuntimeStatus.paired ? 'Reconnect' : 'Connect')}
+                  </button>
+                </div>
+                {localRuntimeErr && <div className="text-[11px] text-coral-deep mt-2">{localRuntimeErr}</div>}
+              </div>
+            )}
+
             {selectedComputer && selectedComputer.kind !== 'cloud' && (
               <Field label="Engine" hint="Only runtimes detected by this computer are offered here.">
                 <Select
@@ -345,12 +458,28 @@ export function AgentEditor({ agent, onClose }: Props) {
                 style={{ background: 'var(--cloud)', border: '1px solid var(--sky-100)' }}
               >
                 <div className="text-[12px] font-semibold text-ink-900 mb-1">
-                  {selectedComputer?.name} is offline. Run this on that computer:
+                  {selectedComputer?.name} is offline.
                 </div>
-                {repairErr ? (
+                {localRuntimeBridge && localRuntimeStatus?.computerId === selectedComputer.id ? (
+                  <>
+                    <div className="text-[11.5px] text-ink-400 mb-2">Reconnect this desktop-managed runtime without opening a terminal.</div>
+                    <button
+                      type="button"
+                      onClick={() => { void restartThisComputer() }}
+                      disabled={localRuntimeBusy || !!repairErr}
+                      className="inline-flex items-center justify-center min-w-[120px] text-[11.5px] font-semibold px-3 py-1.5 rounded-[9px] text-white bg-skype disabled:opacity-50 transition"
+                    >
+                      {localRuntimeBusy ? 'Reconnecting…' : 'Reconnect in app'}
+                    </button>
+                    {(localRuntimeErr || repairErr) && (
+                      <div className="text-[11px] text-coral-deep mt-2">{localRuntimeErr || repairErr}</div>
+                    )}
+                  </>
+                ) : repairErr ? (
                   <div className="text-[11.5px] text-coral-deep bg-coral-soft rounded-[8px] p-2">{repairErr}</div>
                 ) : repairCommand ? (
                   <>
+                    <div className="text-[11.5px] text-ink-400 mb-2">This is another computer. Run the reconnect command on that machine:</div>
                     <pre className="bg-ink-900 text-cloud rounded-[9px] p-2.5 text-[11.5px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">
                       {repairCommand}
                     </pre>
