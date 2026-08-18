@@ -31,13 +31,9 @@ export interface LocalRuntimeModelBridge {
   models: (engine: Exclude<EngineId, 'managed'>) => Promise<LocalRuntimeModelResult>
 }
 
-/**
- * `src/lib/runtime.ts` describes the stable desktop bridge. Model discovery is
- * intentionally isolated here while Runtime 2.0 is being built so older desktop
- * shells (which do not expose `models`) remain source-compatible with the web UI.
- */
+/** Optional so a newer web bundle still works inside an older desktop shell. */
 export function getLocalRuntimeModelBridge(): LocalRuntimeModelBridge | null {
   if (typeof window === 'undefined') return null
-  const localRuntime = window.cumora?.localRuntime as unknown as Partial<LocalRuntimeModelBridge> | undefined
-  return typeof localRuntime?.models === 'function' ? localRuntime as LocalRuntimeModelBridge : null
+  const models = window.cumora?.localRuntime?.models
+  return typeof models === 'function' ? { models } : null
 }
