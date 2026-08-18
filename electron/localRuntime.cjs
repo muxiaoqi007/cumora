@@ -68,8 +68,6 @@ function resolveRuntimeBin(engine) {
       const candidate = path.join(dir, engine + ext)
       try {
         if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-          // On Windows npm CLIs are normally .cmd wrappers; let cmd.exe launch
-          // them. No user-controlled arguments are passed by discovery calls.
           return {
             command: process.platform === 'win32' ? engine : candidate,
             shell: process.platform === 'win32',
@@ -273,6 +271,7 @@ function parsePiModels(output) {
       isDefault: false,
       reasoningEfforts: [],
       defaultReasoningEffort: null,
+      supportsThinking: /^yes$/i.test(cols[4] || ''),
     })
   }
   return models
@@ -320,8 +319,6 @@ function listCodexModels() {
     const requestPage = (cursor) => {
       pageCount += 1
       modelReqId = ++reqId
-      // Codex app-server is JSON-RPC shaped but deliberately omits the
-      // `jsonrpc: "2.0"` member on the wire (see its protocol README).
       send({ id: modelReqId, method: 'model/list', params: { limit: 100, cursor: cursor || null } })
     }
     const addModels = (data) => {
@@ -341,6 +338,7 @@ function listCodexModels() {
           isDefault: row.isDefault === true,
           reasoningEfforts: efforts,
           defaultReasoningEffort: typeof row.defaultReasoningEffort === 'string' ? row.defaultReasoningEffort : null,
+          supportsThinking: efforts.length > 0,
         })
       }
     }
@@ -396,9 +394,6 @@ async function listLocalModels(engine) {
   if (!SUPPORTED_ENGINES.has(engine)) throw new Error(`Unsupported local runtime: ${engine}`)
   if (engine === 'pi') return listPiModels()
   if (engine === 'codex') return listCodexModels()
-  // Claude Code currently accepts --model but does not expose an equivalent
-  // stable local catalog command. Keep custom/manual input rather than shipping
-  // a stale hardcoded list.
   return { ok: true, engine: 'claude', source: 'manual', models: [] }
 }
 
