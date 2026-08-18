@@ -320,7 +320,9 @@ function listCodexModels() {
     const requestPage = (cursor) => {
       pageCount += 1
       modelReqId = ++reqId
-      send({ jsonrpc: '2.0', id: modelReqId, method: 'model/list', params: { limit: 100, cursor: cursor || null } })
+      // Codex app-server is JSON-RPC shaped but deliberately omits the
+      // `jsonrpc: "2.0"` member on the wire (see its protocol README).
+      send({ id: modelReqId, method: 'model/list', params: { limit: 100, cursor: cursor || null } })
     }
     const addModels = (data) => {
       if (!Array.isArray(data)) return
@@ -358,7 +360,7 @@ function listCodexModels() {
           return
         }
         if (msg?.id === 1 && msg.result) {
-          send({ jsonrpc: '2.0', method: 'initialized', params: {} })
+          send({ method: 'initialized', params: {} })
           requestPage(null)
           continue
         }
@@ -381,7 +383,7 @@ function listCodexModels() {
     })
 
     send({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
+      id: 1, method: 'initialize',
       params: { clientInfo: { name: 'cumora-desktop', title: 'Cumora Desktop', version: '1.0.0' }, capabilities: { experimentalApi: true } },
     })
 
