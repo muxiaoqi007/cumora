@@ -108,11 +108,7 @@ export async function finishAgentRun(args: {
   error?: string | null
   toolCallCount?: number
   tokenCount?: number
-  /** Model id (for cache-aware pricing). */
   model?: string | null
-  /** Cache-aware token breakdown. When present we also store the breakdown +
-   *  effective cost; when absent, only the legacy fields are written (COALESCE
-   *  leaves the cost columns at their defaults). */
   usage?: TokenUsage | null
 }): Promise<void> {
   const usage = args.usage ?? null
@@ -156,9 +152,6 @@ export async function finishAgentRun(args: {
   )
 }
 
-/** Record one inbox-triage call (the small-brain gate) with its cache-aware cost.
- *  Best-effort: a DB hiccup must never break a turn. `usage` null/undefined means
- *  the engine gave us no token counts (e.g. codex) → stored as unmeasured. */
 export async function recordTriage(args: {
   agentId: string
   companyId?: string | null
@@ -167,7 +160,6 @@ export async function recordTriage(args: {
   actionable: boolean
   reason?: string | null
   usage?: TokenUsage | null
-  /** The big-brain run this triage WOKE (actionable=true), if known. */
   runId?: string | null
 }): Promise<void> {
   const measured = !!args.usage
@@ -201,12 +193,6 @@ export async function recordTriage(args: {
   }
 }
 
-/** Heartbeat a still-running run: bump updated_at so the stale-run sweeper does
- *  NOT reap a legitimately long turn. Cloud turns stay alive implicitly (every
- *  recordAgentEvent bumps updated_at); BYOA turns emit no mid-run events, so the
- *  daemon must call this periodically while its engine turn is in flight, or any
- *  turn >maxAgeMs gets falsely closed as "orphaned". Only touches a 'running' row
- *  so it can never resurrect a finished/failed one. */
 export async function touchAgentRun(runId: string): Promise<void> {
   await pool.query(
     `UPDATE agent_runs SET updated_at = NOW() WHERE id = $1 AND status = 'running'`,
@@ -249,8 +235,6 @@ export function startStaleAgentRunSweeper(
   t.unref?.()
   return t
 }
-
-// ─── triage economics ─────────────────────────────────────────────────────
 
 export interface TriageAgentRow {
   agentId: string
@@ -374,7 +358,7 @@ export async function getTriageEconomics(args: {
             count(*)::int AS turn_n,
             COALESCE(sum(r.input_tokens), 0)::bigint AS input_tokens,
             COALESCE(sum(r.cached_input_tokens), 0)::bigint AS cached_tokens,
-            COALESCE(sum(r.cache_creation_input_tokens), 0)::bigint AS cache_creation_tokens,
+            COALESCE(sum(r.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
             COALESCE(sum(r.output_tokens), 0)::bigint AS output_tokens
        FROM agent_runs r
       WHERE r.company_id = $1 AND r.started_at > NOW() - ($2::double precision * INTERVAL '1 millisecond') ${runAgentFilter}
