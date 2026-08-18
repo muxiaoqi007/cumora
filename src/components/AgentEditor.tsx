@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, getServerOrigin, type AgentInput } from '@/api/client'
 import { isNativePlatform } from '@/lib/native'
+import { runtimeDefinition, runtimeLabel } from '@/lib/runtimeCatalog'
 import { useParticipants } from '@/stores/participants'
 import { useComputers } from '@/stores/computers'
 import { useConversations } from '@/stores/conversations'
@@ -56,6 +57,7 @@ export function AgentEditor({ agent, onClose }: Props) {
   const selectedComputer = computerId ? computersById[computerId] : undefined
   const isByoa = !!selectedComputer && selectedComputer.kind !== 'cloud'
   const selectedComputerOffline = isByoa && selectedComputer.status !== 'online'
+  const runtime = runtimeDefinition(engine)
   const origin = getServerOrigin()
   const repairCommand = repairCode
     ? `npx cumora@latest agent computer --pair ${repairCode}${origin ? ` --server ${origin}` : ''}`
@@ -89,13 +91,30 @@ export function AgentEditor({ agent, onClose }: Props) {
     else if (!isFreeTier && cloud) { setComputerId(cloud.id); setEngine('managed') }
   }, [cloud, firstByoa, computerId, isFreeTier])
 
+  /**
+   * A participant only has one model/fastModel pair today (not one pair per
+   * runtime), so carrying a Claude model into Codex/Pi is almost certainly a
+   * configuration error. Reset the model overrides whenever the runtime changes.
+   */
+  const changeEngine = (next: EngineId): void => {
+    if (next !== engine) {
+      setModel('')
+      setFastModel('')
+    }
+    setEngine(next)
+  }
+
   const changeComputer = (id: string): void => {
     setComputerId(id)
     const c = computersById[id]
-    if (!c || c.kind === 'cloud') setEngine('managed')
-    else setEngine((agent?.engine as EngineId) && c.availableEngines.includes(agent!.engine as EngineId)
+    if (!c || c.kind === 'cloud') {
+      changeEngine('managed')
+      return
+    }
+    const next = (agent?.engine as EngineId) && c.availableEngines.includes(agent!.engine as EngineId)
       ? (agent!.engine as EngineId)
-      : (c.availableEngines[0] ?? 'claude'))
+      : (c.availableEngines[0] ?? 'claude')
+    changeEngine(next)
   }
 
   // Esc to close
@@ -123,7 +142,7 @@ export function AgentEditor({ agent, onClose }: Props) {
       }
       // Persist the host assignment when the computer OR the engine changed.
       // (Engine lives in the same assign call; gating only on the computer
-      // would silently drop a Claude→Codex switch on the same machine.) Still
+      // would silently drop a Claude→Codex/Pi switch on the same machine.) Still
       // skipped on a plain style edit to avoid the owner/admin-gated call.
       const target = computerId || cloud?.id
       const current = agent?.computerId ?? cloud?.id
@@ -236,83 +255,94 @@ export function AgentEditor({ agent, onClose }: Props) {
             />
           </Field>
 
-          <Field
-            label={isByoa ? 'Big-brain model (大脑)' : 'Model'}
-            hint={isByoa
-              ? `Main reasoning model passed to the engine as --model. ${engine === 'codex' ? 'A model name (e.g. gpt-5.5, o3).' : "A Claude alias or full name (e.g. opus, sonnet, claude-sonnet-4-6)."} Blank = engine default.`
-              : 'Optional — leave blank to use the system default. Any OpenAI model name works (e.g. gpt-5.5, gpt-5.5-pro, gpt-5.5-mini).'}
-          >
-            <Input
-              type="text"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="(default)"
-              className="font-mono"
-              spellCheck={false}
-            />
-          </Field>
+          <div className="rounded-[14px] p-4 space-y-4" style={{ background: 'var(--sky-50)', border: '1px solid var(--sky-100)' }}>
+            <div>
+              <div className="text-[11px] font-bold tracking-wider uppercase text-ink-500">Runtime</div>
+              <div className="text-[11.5px] text-ink-400 mt-0.5 font-display italic">
+                Choose where this agent runs, then choose its engine and model independently from the other agents.
+              </div>
+            </div>
 
-          {isByoa && (
             <Field
-              label="Small-brain model (小脑)"
-              hint={engine === 'codex'
-                ? 'Cheaper model for light auxiliary tasks (e.g. gpt-5.4-mini). Blank = same as big-brain.'
-                : "Cheaper/faster model for light auxiliary tasks — maps to Claude's ANTHROPIC_SMALL_FAST_MODEL. Blank = engine default."}
+              label="Runs on"
+              hint="Which computer executes this agent. Cumora Cloud is managed; a paired computer runs local runtimes using that machine's existing logins."
             >
-              <Input
-                type="text"
-                value={fastModel}
-                onChange={(e) => setFastModel(e.target.value)}
-                placeholder="(default)"
-                className="font-mono"
-                spellCheck={false}
+              <Select
+                ariaLabel="Runs on"
+                value={computerId}
+                onValueChange={changeComputer}
+                options={[
+                  // Free tier has no real Cumora Cloud computer — filter any out
+                  // (defensive) and append a locked Pro upsell entry instead.
+                  // NOT on native: App Store Guideline 3.1.1 forbids referencing
+                  // a paid tier that isn't purchasable in-app via IAP, so the
+                  // iOS/Android builds omit the upsell entirely.
+                  ...computers
+                    .filter((c) => !(isFreeTier && c.kind === 'cloud'))
+                    .map((c) => ({
+                      value: c.id,
+                      label: `${c.kind === 'cloud' ? '☁' : c.kind === 'vps' ? '🖥' : '💻'} ${c.name}`
+                        + (c.kind !== 'cloud' && c.status !== 'online' ? ' (offline)' : ''),
+                    })),
+                  ...(isFreeTier && !isNativePlatform()
+                    ? [{ value: '__cloud_pro__', label: '☁ Cumora Cloud — upgrade to Pro', disabled: true }]
+                    : []),
+                ]}
               />
             </Field>
-          )}
 
-          <Field
-            label="Runs on"
-            hint="Which computer executes this agent. Cumora Cloud is managed; a computer you've paired runs it on your local Claude Code or Codex."
-          >
-            <Select
-              ariaLabel="Runs on"
-              value={computerId}
-              onValueChange={changeComputer}
-              options={[
-                // Free tier has no real Cumora Cloud computer — filter any out
-                // (defensive) and append a locked Pro upsell entry instead.
-                // NOT on native: App Store Guideline 3.1.1 forbids referencing
-                // a paid tier that isn't purchasable in-app via IAP, so the
-                // iOS/Android builds omit the upsell entirely.
-                ...computers
-                  .filter((c) => !(isFreeTier && c.kind === 'cloud'))
-                  .map((c) => ({
-                    value: c.id,
-                    label: `${c.kind === 'cloud' ? '☁' : c.kind === 'vps' ? '🖥' : '💻'} ${c.name}`
-                      + (c.kind !== 'cloud' && c.status !== 'online' ? ' (offline)' : ''),
-                  })),
-                ...(isFreeTier && !isNativePlatform()
-                  ? [{ value: '__cloud_pro__', label: '☁ Cumora Cloud — upgrade to Pro', disabled: true }]
-                  : []),
-              ]}
-            />
             {selectedComputer && selectedComputer.kind !== 'cloud' && (
-              <div className="mt-2">
+              <Field label="Engine" hint="Only runtimes detected by this computer are offered here.">
                 <Select
                   ariaLabel="Engine"
                   value={engine}
-                  onValueChange={(v) => setEngine(v as EngineId)}
+                  onValueChange={(v) => changeEngine(v as EngineId)}
                   options={(selectedComputer.availableEngines.length
                     ? selectedComputer.availableEngines
                     : (['claude'] as EngineId[])
-                  ).map((en) => ({ value: en, label: en === 'claude' ? 'Claude Code' : en === 'codex' ? 'Codex' : en }))}
+                  ).map((en) => ({ value: en, label: runtimeLabel(en) }))}
                 />
-              </div>
+                <div className="text-[11.5px] text-ink-400 mt-1.5 font-display italic">
+                  {runtime.description}
+                </div>
+              </Field>
             )}
+
+            <Field
+              label={isByoa ? 'Main model' : 'Model'}
+              hint={runtime.modelHint}
+            >
+              <Input
+                type="text"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="Runtime default"
+                className="font-mono"
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+              />
+            </Field>
+
+            {isByoa && runtime.supportsFastModel && (
+              <Field label="Fast model" hint={runtime.fastModelHint}>
+                <Input
+                  type="text"
+                  value={fastModel}
+                  onChange={(e) => setFastModel(e.target.value)}
+                  placeholder="Runtime default"
+                  className="font-mono"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+              </Field>
+            )}
+
             {selectedComputerOffline && (
               <div
-                className="mt-3 rounded-[12px] p-3"
-                style={{ background: 'var(--sky-50)', border: '1px solid var(--sky-100)' }}
+                className="rounded-[12px] p-3"
+                style={{ background: 'var(--cloud)', border: '1px solid var(--sky-100)' }}
               >
                 <div className="text-[12px] font-semibold text-ink-900 mb-1">
                   {selectedComputer?.name} is offline. Run this on that computer:
@@ -338,7 +368,7 @@ export function AgentEditor({ agent, onClose }: Props) {
                 )}
               </div>
             )}
-          </Field>
+          </div>
 
           <Field label="Avatar color" hint="Used as a fallback when no AI portrait is generated.">
             <div className="flex flex-wrap gap-2">
