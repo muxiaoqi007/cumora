@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { pool } from '../db/pool.js'
 import { effectiveCostUsd, priceFor, modelPriceTable, EMPTY_USAGE, type TokenUsage } from './cost.js'
+import { resolveByoaTriageModel, type ByoaLlmSource } from './byoa-observability.js'
 
 export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'skipped'
-export type TriageSource = 'cloud' | 'byoa-claude' | 'byoa-codex'
+export type TriageSource = 'cloud' | ByoaLlmSource
 export type AgentEventLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const MAX_STRING_CHARS = 24_000
@@ -116,7 +117,6 @@ export async function finishAgentRun(args: {
 }): Promise<void> {
   const usage = args.usage ?? null
   const cost = usage ? effectiveCostUsd(args.model, usage) : null
-  // Legacy token_count = input+output sum; keep it populated for back-compat.
   const tokenCount = args.tokenCount ?? (usage
     ? usage.inputTokens + usage.cachedInputTokens + usage.cacheCreationTokens + usage.outputTokens
     : 0)
@@ -172,7 +172,16 @@ export async function recordTriage(args: {
 }): Promise<void> {
   const measured = !!args.usage
   const usage = args.usage ?? EMPTY_USAGE
-  const cost = effectiveCostUsd(args.model, usage)
+  let model = args.model ?? null
+  if (args.source !== 'cloud') {
+    model = await resolveByoaTriageModel({
+      source: args.source,
+      agentId: args.agentId,
+      companyId: args.companyId,
+      reportedModel: model,
+    })
+  }
+  const cost = effectiveCostUsd(model, usage)
   try {
     await pool.query(
       `INSERT INTO agent_triages (
@@ -182,7 +191,7 @@ export async function recordTriage(args: {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [
         `tri-${randomUUID()}`, args.agentId, args.companyId ?? null, args.source,
-        args.model ?? null, args.actionable, (args.reason ?? '').slice(0, 500),
+        model, args.actionable, (args.reason ?? '').slice(0, 500),
         usage.inputTokens, usage.cachedInputTokens, usage.cacheCreationTokens, usage.outputTokens,
         measured ? cost.usd : 0, cost.estimated, measured, args.runId ?? null,
       ],
@@ -250,11 +259,11 @@ export interface TriageAgentRow {
   skipCount: number
   wakeCount: number
   triageCostUsd: number
-  triageOverheadUsd: number   // triage cost spent on actionable=true (paid the gate AND ran the turn)
+  triageOverheadUsd: number
   turnCount: number
   avgTurnCostUsd: number
   turnCacheHitRate: number
-  estimatedNetSavingsUsd: number  // skipCount*avgTurnCost − triageCost (this agent's own avg)
+  estimatedNetSavingsUsd: number
 }
 
 export interface TriageLedgerRow {
@@ -271,21 +280,19 @@ export interface TriageLedgerRow {
   costUsd: number
   costEstimated: boolean
   measured: boolean
-  estSavingUsd: number | null  // for skips: this agent's avgTurnCost − this triage cost; null for wakes
+  estSavingUsd: number | null
   createdAt: string
 }
 
-/** The per-1M-token unit price actually used to cost a model in this window. */
 export interface TriageUnitPrice {
-  role: 'triage' | 'turn'   // triage = small brain (cerebellum), turn = big brain
+  role: 'triage' | 'turn'
   model: string
   inPer1M: number
   cachedInPer1M: number
   outPer1M: number
-  estimated: boolean        // true = seeded/fallback (NOT an operator-supplied real rate)
+  estimated: boolean
 }
 
-/** A row in the full price-menu reference table. */
 export interface TriagePriceRow {
   model: string
   inPer1M: number
@@ -303,28 +310,23 @@ export interface TriageEconomics {
   triageMeasuredCount: number
   triageCostUsd: number
   triageOverheadUsd: number
-  triageInputTokens: number        // uncached input tokens across triages (real, plan-independent)
+  triageInputTokens: number
   triageCachedInputTokens: number
   triageOutputTokens: number
   turnCount: number
   turnCostUsd: number
   avgTurnCostUsd: number
   turnCacheHitRate: number
-  estimatedAvoidedUsd: number      // Σ per-agent skipCount*avgTurnCost — the avoided BIG-BRAIN spend
-  estimatedNetSavingsUsd: number   // estimatedAvoided − triageCost (LABELED estimate in the UI)
-  costEstimated: boolean           // any price was a seeded/fallback estimate, not an operator rate
-  byoaShare: number                // fraction of triages on BYOA (flat-rate $ → meter-equivalent, not a bill)
-  unitPrices: TriageUnitPrice[]    // the actual per-token rates used (small brain vs big brain)
-  priceTable: TriagePriceRow[]     // the full price menu (reference), always populated
+  estimatedAvoidedUsd: number
+  estimatedNetSavingsUsd: number
+  costEstimated: boolean
+  byoaShare: number
+  unitPrices: TriageUnitPrice[]
+  priceTable: TriagePriceRow[]
   perAgent: TriageAgentRow[]
   recent: TriageLedgerRow[]
 }
 
-/** The honest triage ledger. Compares actual triage spend against the big-brain
- *  turns it shields, all cache-aware. The ONE counterfactual — "estimated net
- *  savings" — uses each agent's OWN recent mean turn cost as the value of an
- *  avoided turn, and is labeled as an estimate in the UI. Everything else is
- *  measured. */
 export async function getTriageEconomics(args: {
   companyId: string
   agentId?: string | null
@@ -337,12 +339,6 @@ export async function getTriageEconomics(args: {
   const params: unknown[] = [args.companyId, ms]
   if (args.agentId) params.push(args.agentId)
 
-  // IMPORTANT: cost is computed HERE, at query time, from the stored TOKEN COUNTS
-  // × the CURRENT prices — NOT from the stored cost_usd (which froze whatever price
-  // was in effect at record time). This way a price change (code OR
-  // CUMORA_MODEL_PRICES_JSON) instantly re-prices ALL history, matching the
-  // "token counts are real, prices are live" promise. We aggregate tokens grouped
-  // by (agent, model) because the per-token rate is model-specific.
   const toUsage = (r: { input_tokens: string; cached_tokens: string; cache_creation_tokens: string; output_tokens: string }): TokenUsage => ({
     inputTokens: Number(r.input_tokens),
     cachedInputTokens: Number(r.cached_tokens),
@@ -370,8 +366,6 @@ export async function getTriageEconomics(args: {
     params,
   )
 
-  // Only measured (non-zero-token) runs feed turn cost / the avg counterfactual —
-  // orphaned/0-token runs would falsely depress it.
   const runAgg = await pool.query<{
     agent_id: string; model: string | null; turn_n: number;
     input_tokens: string; cached_tokens: string; cache_creation_tokens: string; output_tokens: string;
@@ -380,7 +374,7 @@ export async function getTriageEconomics(args: {
             count(*)::int AS turn_n,
             COALESCE(sum(r.input_tokens), 0)::bigint AS input_tokens,
             COALESCE(sum(r.cached_input_tokens), 0)::bigint AS cached_tokens,
-            COALESCE(sum(r.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+            COALESCE(sum(r.cache_creation_input_tokens), 0)::bigint AS cache_creation_tokens,
             COALESCE(sum(r.output_tokens), 0)::bigint AS output_tokens
        FROM agent_runs r
       WHERE r.company_id = $1 AND r.started_at > NOW() - ($2::double precision * INTERVAL '1 millisecond') ${runAgentFilter}
@@ -428,8 +422,6 @@ export async function getTriageEconomics(args: {
     a.totalInput += u.inputTokens + u.cachedInputTokens
   }
 
-  // perAgent = agents that actually triaged (a run-only agent has nothing to report
-  // in a TRIAGE ledger). Their turn data is still accumulated above for avg cost.
   const perAgent: TriageAgentRow[] = [...acc.entries()]
     .filter(([, a]) => a.triageCount > 0)
     .map(([agentId, a]) => {
@@ -445,7 +437,6 @@ export async function getTriageEconomics(args: {
     })
   const avgCostByAgent = new Map(perAgent.map((a) => [a.agentId, a.avgTurnCostUsd]))
 
-  // Recent triage ledger — each row's cost computed LIVE from its tokens.
   const recentRows = await pool.query<{
     id: string; agent_id: string; agent_name: string; source: string; model: string | null;
     actionable: boolean; reason: string | null; input_tokens: number; cached_input_tokens: number;
@@ -480,7 +471,6 @@ export async function getTriageEconomics(args: {
     }
   })
 
-  // Unit prices used, by role — live via priceFor (the rates the costs above used).
   const unitPrices: TriageUnitPrice[] = []
   const seenUnit = new Set<string>()
   const pushUnit = (role: 'triage' | 'turn', model: string | null): void => {
@@ -494,8 +484,6 @@ export async function getTriageEconomics(args: {
   for (const t of triAgg.rows) pushUnit('triage', t.model)
   for (const r of runAgg.rows) pushUnit('turn', r.model)
 
-  // Global rollups (turn metrics over ALL agents with runs; triage metrics + the
-  // net over the agents that triaged, using each agent's OWN avg turn cost).
   let triageCostUsd = 0, estimatedAvoidedUsd = 0, triageCount = 0, triageSkip = 0, triageWake = 0
   let triageMeasured = 0, triageOverhead = 0, byoaTri = 0
   let turnCostUsd = 0, turnCount = 0, cacheRead = 0, totalInput = 0
@@ -507,7 +495,6 @@ export async function getTriageEconomics(args: {
       estimatedAvoidedUsd += a.skipCount * (a.turnCount > 0 ? a.turnCostUsd / a.turnCount : 0)
     }
   }
-  // triage token totals (real, plan-independent) from the by-model groups.
   const triageInputTokens = triAgg.rows.reduce((s, t) => s + Number(t.input_tokens), 0)
   const triageCachedInputTokens = triAgg.rows.reduce((s, t) => s + Number(t.cached_tokens), 0)
   const triageOutputTokens = triAgg.rows.reduce((s, t) => s + Number(t.output_tokens), 0)
