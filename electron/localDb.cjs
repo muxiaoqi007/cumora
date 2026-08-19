@@ -30,30 +30,44 @@ function log(msg) {
 function pgBinDir() {
   if (app.isPackaged) {
     const bundled = join(process.resourcesPath, 'postgresql', 'bin')
-    if (existsSync(join(bundled, 'postgres'))) return bundled
+    const bundledExe = process.platform === 'win32' ? 'postgres.exe' : 'postgres'
+    if (existsSync(join(bundled, bundledExe))) return bundled
   }
-  const homebrewPaths = [
-    '/opt/homebrew/opt/postgresql@16/bin',
-    '/opt/homebrew/opt/postgresql@17/bin',
-    '/opt/homebrew/opt/postgresql@15/bin',
-    '/opt/homebrew/opt/postgresql@14/bin',
-    '/opt/homebrew/bin',
-    '/usr/local/opt/postgresql@16/bin',
-    '/usr/local/opt/postgresql@17/bin',
-    '/usr/local/opt/postgresql@15/bin',
-    '/usr/local/opt/postgresql@14/bin',
-    '/usr/local/bin',
-  ]
-  for (const p of homebrewPaths) {
-    if (existsSync(join(p, 'postgres')) && existsSync(join(p, 'initdb'))) return p
+  const candidates = process.platform === 'win32'
+    ? [
+        'C:\\Program Files\\PostgreSQL\\17\\bin',
+        'C:\\Program Files\\PostgreSQL\\16\\bin',
+        'C:\\Program Files\\PostgreSQL\\15\\bin',
+        'C:\\Program Files\\PostgreSQL\\14\\bin',
+      ]
+    : [
+        '/opt/homebrew/opt/postgresql@16/bin',
+        '/opt/homebrew/opt/postgresql@17/bin',
+        '/opt/homebrew/opt/postgresql@15/bin',
+        '/opt/homebrew/opt/postgresql@14/bin',
+        '/opt/homebrew/bin',
+        '/usr/local/opt/postgresql@16/bin',
+        '/usr/local/opt/postgresql@17/bin',
+        '/usr/local/opt/postgresql@15/bin',
+        '/usr/local/opt/postgresql@14/bin',
+        '/usr/local/bin',
+      ]
+  const exe = process.platform === 'win32' ? '.exe' : ''
+  for (const p of candidates) {
+    if (existsSync(join(p, 'postgres' + exe)) && existsSync(join(p, 'initdb' + exe))) return p
   }
   return null
 }
 
 function pgBin(name) {
   const dir = pgBinDir()
-  if (!dir) throw new Error('PostgreSQL not found. Install with: brew install postgresql@16')
-  return join(dir, name)
+  if (!dir) {
+    throw new Error(process.platform === 'win32'
+      ? 'PostgreSQL not found. Install PostgreSQL 16 from https://www.postgresql.org/download/windows/ and retry.'
+      : 'PostgreSQL not found. Install with: brew install postgresql@16')
+  }
+  const exe = process.platform === 'win32' && !name.endsWith('.exe') ? '.exe' : ''
+  return join(dir, name + exe)
 }
 
 function dataDir() {
@@ -154,15 +168,18 @@ async function startServer() {
       else resolve()
     }
 
-    pgProcess = spawn(bin, [
+    const args = [
       '-D', dir,
       '-p', String(PG_PORT),
       '-c', 'listen_addresses=127.0.0.1',
-      '-c', `unix_socket_directories=${socketDir()}`,
       '-c', 'max_connections=20',
       '-c', 'shared_buffers=32MB',
       '-c', 'log_min_messages=info',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    ]
+    if (process.platform !== 'win32') {
+      args.push('-c', `unix_socket_directories=${socketDir()}`)
+    }
+    pgProcess = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     pgProcess.stdout?.on('data', (b) => { for (const line of b.toString().split('\n')) pushLog(line) })
     pgProcess.stderr?.on('data', (b) => { for (const line of b.toString().split('\n')) pushLog(line) })
