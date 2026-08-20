@@ -27,51 +27,54 @@ function log(msg) {
   console.log(msg)
 }
 
-function pgBinDir() {
-  if (app.isPackaged) {
-    const bundled = join(process.resourcesPath, 'postgresql', 'bin')
-    const bundledExe = process.platform === 'win32' ? 'postgres.exe' : 'postgres'
-    if (existsSync(join(bundled, bundledExe))) return bundled
-  }
-  const candidates = process.platform === 'win32'
-    ? [
-        'C:\\Program Files\\PostgreSQL\\17\\bin',
-        'C:\\Program Files\\PostgreSQL\\16\\bin',
-        'C:\\Program Files\\PostgreSQL\\15\\bin',
-        'C:\\Program Files\\PostgreSQL\\14\\bin',
-      ]
-    : [
-        '/opt/homebrew/opt/postgresql@16/bin',
-        '/opt/homebrew/opt/postgresql@17/bin',
-        '/opt/homebrew/opt/postgresql@15/bin',
-        '/opt/homebrew/opt/postgresql@14/bin',
-        '/opt/homebrew/bin',
-        '/usr/local/opt/postgresql@16/bin',
-        '/usr/local/opt/postgresql@17/bin',
-        '/usr/local/opt/postgresql@15/bin',
-        '/usr/local/opt/postgresql@14/bin',
-        '/usr/local/bin',
-      ]
-  const exe = process.platform === 'win32' ? '.exe' : ''
-  for (const p of candidates) {
-    if (existsSync(join(p, 'postgres' + exe)) && existsSync(join(p, 'initdb' + exe))) return p
+function exeName(name) {
+  return process.platform === 'win32' && !name.endsWith('.exe') ? `${name}.exe` : name
+}
+
+function pgRoot() {
+  const exe = exeName('postgres')
+  const packaged = join(process.resourcesPath, 'postgresql')
+  if (app.isPackaged && existsSync(join(packaged, 'bin', exe))) return packaged
+
+  const plat = `${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`
+  const fromNode = join(app.getAppPath(), '..', '..', `node_modules/@embedded-postgres/${plat}/native`)
+  const fromDev = join(__dirname, '..', 'node_modules', '@embedded-postgres', plat, 'native')
+  const fromVendor = join(__dirname, '..', 'vendor', 'postgresql')
+  for (const root of [fromVendor, fromDev, fromNode]) {
+    if (existsSync(join(root, 'bin', exe))) return root
   }
   return null
+}
+
+function pgBinDir() {
+  const root = pgRoot()
+  return root ? join(root, 'bin') : null
+}
+
+function pgEnv() {
+  const root = pgRoot()
+  const lib = root ? join(root, 'lib') : ''
+  const bin = pgBinDir() || ''
+  return {
+    ...process.env,
+    PATH: bin + (process.env.PATH ? `${require('node:path').delimiter}${process.env.PATH}` : ''),
+    DYLD_FALLBACK_LIBRARY_PATH: lib,
+    DYLD_LIBRARY_PATH: lib,
+    LD_LIBRARY_PATH: lib,
+  }
 }
 
 function pgBin(name) {
   const dir = pgBinDir()
   if (!dir) {
-    throw new Error(process.platform === 'win32'
-      ? 'PostgreSQL not found. Install PostgreSQL 16 from https://www.postgresql.org/download/windows/ and retry.'
-      : 'PostgreSQL not found. Install with: brew install postgresql@16')
+    throw new Error('Bundled PostgreSQL is missing from this Cumora build. Reinstall the app.')
   }
-  const exe = process.platform === 'win32' && !name.endsWith('.exe') ? '.exe' : ''
-  return join(dir, name + exe)
+  return join(dir, exeName(name))
 }
 
 function dataDir() {
-  return join(app.getPath('userData'), 'postgres')
+  // Separate from the old Homebrew-initdb cluster (PG 16) under `postgres/`.
+  return join(app.getPath('userData'), 'pgdata')
 }
 
 function socketDir() {
@@ -137,7 +140,8 @@ async function initdb() {
     '--auth=trust',
     '--username=cumora',
     '--encoding=UTF8',
-  ])
+    '--locale=C',
+  ], { env: pgEnv() })
   log('[local-db] initdb complete')
 }
 
@@ -179,7 +183,7 @@ async function startServer() {
     if (process.platform !== 'win32') {
       args.push('-c', `unix_socket_directories=${socketDir()}`)
     }
-    pgProcess = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    pgProcess = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: pgEnv() })
 
     pgProcess.stdout?.on('data', (b) => { for (const line of b.toString().split('\n')) pushLog(line) })
     pgProcess.stderr?.on('data', (b) => { for (const line of b.toString().split('\n')) pushLog(line) })
@@ -212,16 +216,22 @@ async function startServer() {
 }
 
 async function createDatabase() {
+  const { Client } = require('pg')
+  const client = new Client({
+    host: '127.0.0.1',
+    port: PG_PORT,
+    user: 'cumora',
+    database: 'postgres',
+  })
+  await client.connect()
   try {
-    await execFileP(pgBin('createdb'), [
-      '-p', String(PG_PORT), '-h', '127.0.0.1', '-U', 'cumora',
-      '--maintenance-db=postgres',
-      PG_DB,
-    ])
-    log('[local-db] created database "cumora"')
-  } catch (e) {
-    const msg = String(e?.stderr || e?.message || e)
-    if (!/already exists/i.test(msg)) log('[local-db] createDatabase: ' + msg)
+    const { rows } = await client.query('SELECT 1 FROM pg_database WHERE datname = $1', [PG_DB])
+    if (rows.length === 0) {
+      await client.query(`CREATE DATABASE ${PG_DB}`)
+      log('[local-db] created database "cumora"')
+    }
+  } finally {
+    await client.end().catch(() => {})
   }
 }
 
@@ -233,14 +243,14 @@ async function stop() {
     return
   }
   try {
-    await execFileP(pgBin('pg_ctl'), ['stop', '-D', dataDir(), '-m', 'fast', '-w'])
+    await execFileP(pgBin('pg_ctl'), ['stop', '-D', dataDir(), '-m', 'fast', '-w'], { env: pgEnv() })
     log('[local-db] PostgreSQL stopped via pg_ctl')
   } catch { /* not running */ }
 }
 
 async function ensure() {
   const dir = pgBinDir()
-  if (!dir) throw new Error('PostgreSQL not found. Install with: brew install postgresql@16')
+  if (!dir) throw new Error('Bundled PostgreSQL is missing from this Cumora build. Reinstall the app.')
   log('[local-db] using binaries in ' + dir)
   await startServer()
   await createDatabase()

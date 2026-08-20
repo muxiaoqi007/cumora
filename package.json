@@ -39,9 +39,9 @@
     "server:build": "node server-build.mjs",
     "electron:dev": "npm run agent-cli:build && concurrently -k -n web,api,electron -c blue,magenta,cyan \"npm:dev\" \"npm:server:dev\" \"wait-on tcp:5180 tcp:5181 && cross-env-shell ELECTRON_RENDERER_URL=http://localhost:5180 electron .\"",
     "electron:start": "npm run agent-cli:build && electron .",
-    "electron:build": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder",
-    "electron:build:mac": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --mac",
-    "electron:build:win": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --win",
+    "electron:build": "npm run build && npm run agent-cli:build && npm run server:build && node scripts/stage-postgres.mjs && electron-builder",
+    "electron:build:mac": "npm run build && npm run agent-cli:build && npm run server:build && node scripts/stage-postgres.mjs darwin-arm64 && electron-builder --mac --arm64",
+    "electron:build:win": "npm run build && npm run agent-cli:build && npm run server:build && node scripts/stage-postgres.mjs windows-x64 && electron-builder --win",
     "electron:build:linux": "npm run build && npm run agent-cli:build && npm run server:build && electron-builder --linux",
     "mobile:sync": "npm run build && npx cap sync",
     "mobile:ios": "npm run mobile:sync && npx cap open ios",
@@ -158,6 +158,10 @@
       {
         "from": "server/dist",
         "to": "server/dist"
+      },
+      {
+        "from": "vendor/postgresql",
+        "to": "postgresql"
       }
     ],
     "directories": {
@@ -237,5 +241,10 @@
       "icon": "build/icon.png",
       "maintainer": "yetone <yetoneful@gmail.com>"
     }
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/darwin-arm64": "^18.4.0-beta.17",
+    "@embedded-postgres/darwin-x64": "^18.4.0-beta.17",
+    "@embedded-postgres/windows-x64": "^18.4.0-beta.17"
   }
 }

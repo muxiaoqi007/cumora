@@ -418,16 +418,16 @@ app.whenReady().then(() => {
     const checkReady = async (attempts = 0) => {
       if (attempts > 60) { // 30s timeout
         console.log('[local-runtime] server not ready after 30s, starting daemon anyway')
-        try { startOwnedDaemon({ serverUrl: 'http://localhost:5181' }) }
+        try { startOwnedDaemon({ serverUrl: 'http://127.0.0.1:5181' }) }
         catch (err) { lastError = err instanceof Error ? err.message : String(err) }
         return
       }
       try {
-        const res = await fetch('http://localhost:5181/api/health')
+        const res = await fetch('http://127.0.0.1:5181/api/health')
         if (res.ok) {
           console.log('[local-runtime] local server ready, starting daemon')
           if (pairedConfig()?.computerId && !alive()) {
-            try { startOwnedDaemon({ serverUrl: 'http://localhost:5181' }) }
+            try { startOwnedDaemon({ serverUrl: 'http://127.0.0.1:5181' }) }
             catch (err) { lastError = err instanceof Error ? err.message : String(err) }
           }
           return

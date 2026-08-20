@@ -9,7 +9,7 @@
 const { app } = require('electron')
 const { existsSync, appendFileSync } = require('node:fs')
 const { join } = require('node:path')
-const { fork } = require('node:child_process')
+const { spawn } = require('node:child_process')
 const http = require('node:http')
 
 const SERVER_PORT = 5181
@@ -38,7 +38,7 @@ function serverEntryPath() {
 function checkHealth() {
   return new Promise((resolve) => {
     const req = http.get(
-      `http://localhost:${SERVER_PORT}/api/health`,
+      `http://127.0.0.1:${SERVER_PORT}/api/health`,
       { timeout: 3000 },
       (res) => { resolve(res.statusCode === 200 || res.statusCode === 503); res.resume() },
     )
@@ -67,6 +67,7 @@ async function start(databaseUrl, apiKey) {
   const env = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
+    CUMORA_SERVER_CHILD: '1',
     CUMORA_LOCAL_MODE: 'true',
     CUMORA_REDIS_MODE: 'local',
     CUMORA_CORS_ORIGINS: '*',
@@ -82,16 +83,13 @@ async function start(databaseUrl, apiKey) {
     ENABLE_CLUSTER_MONITOR: 'false',
   }
 
-  log(`[local-server] forking server on :${SERVER_PORT} (db: ${databaseUrl})`)
+  log(`[local-server] spawning server on :${SERVER_PORT} (db: ${databaseUrl})`)
   log(`[local-server] entry: ${entry}`)
 
-  // Fork as child process. The bundled CJS auto-runs main() when executed
-  // directly (require.main === module). IPC channel ('ipc') is required by fork.
-  serverProcess = fork(entry, [], {
-    execPath: process.execPath,
-    execArgv: [],
+  serverProcess = spawn(process.execPath, [entry], {
     env,
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   })
 
   serverProcess.stdout?.on('data', (b) => {

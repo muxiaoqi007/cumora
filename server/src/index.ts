@@ -238,9 +238,12 @@ async function main() {
   // doc redis channels here so two server instances stay convergent.
   bootDocumentBus()
 
-  server.listen(env.PORT, () => {
-    console.log(`[boot] cumora server :${env.PORT} · instance ${env.INSTANCE_ID} · model ${env.OPENAI_MODEL}`)
-  })
+  const listenHost = env.LOCAL_MODE ? '127.0.0.1' : undefined
+  const onListen = () => {
+    console.log(`[boot] cumora server ${listenHost ?? ''}:${env.PORT} · instance ${env.INSTANCE_ID} · model ${env.OPENAI_MODEL}`)
+  }
+  if (listenHost) server.listen(env.PORT, listenHost, onListen)
+  else server.listen(env.PORT, onListen)
 
   // Demote any 'avail' humans left over from the previous run; real
   // presence will be re-asserted as WS clients reconnect. Run AFTER
@@ -384,13 +387,9 @@ process.on('uncaughtException', (err) => {
 // run immediately. esbuild bundles this as CJS, so `require.main === module`
 // works; in ESM `import.meta.url === pathToFileURL(process.argv[1])` would
 // be the check, but the bundled CJS always uses `require.main`.
-const isMain = typeof require !== 'undefined' && require.main === module
-
-if (isMain) {
-  main().catch((err) => {
-    console.error('[boot] fatal', err)
-    process.exit(1)
-  })
-}
+main().catch((err) => {
+  console.error('[boot] fatal', err)
+  process.exit(1)
+})
 
 export { main as startServer }

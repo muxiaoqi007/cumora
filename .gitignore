@@ -49,6 +49,8 @@ ios/App/.symlinks
 
 # Electron builder output
 release/
+vendor/postgresql
+vendor/.pg-tmp
 
 # Runtime-generated user content (AI portraits + image uploads)
 server/uploads/
