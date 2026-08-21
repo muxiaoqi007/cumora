@@ -305,6 +305,26 @@ interface AgentInfo {
   fastModel: string | null
 }
 
+function looksOpenAiModel(id: string): boolean {
+  return /^(gpt-|o[1-9]|codex)/i.test(id)
+}
+function looksClaudeModel(id: string): boolean {
+  return /^(claude|haiku|sonnet|opus)/i.test(id)
+}
+function sanitizeAgentForEngine(agent: AgentInfo, engine: EngineId): AgentInfo {
+  let model = agent.model
+  let fastModel = agent.fastModel
+  if (engine === 'claude') {
+    if (model && looksOpenAiModel(model)) model = null
+    if (fastModel && looksOpenAiModel(fastModel)) fastModel = null
+  }
+  if (engine === 'codex') {
+    if (model && looksClaudeModel(model)) model = null
+    if (fastModel && looksClaudeModel(fastModel)) fastModel = null
+  }
+  return { ...agent, model, fastModel }
+}
+
 interface RuntimeInboxResponse {
   rows?: Array<{
     id?: string
@@ -2093,7 +2113,9 @@ async function doRun(serverOverride?: string): Promise<void> {
     }
     for (const agent of agents) {
       const engine: EngineId | null =
-        agent.engine && available.includes(agent.engine) ? agent.engine : (available[0] ?? null)
+        agent.engine && ENGINE_IDS.includes(agent.engine)
+          ? agent.engine
+          : (available[0] ?? null)
       if (!engine) continue
       const existing = runners.get(agent.id)
       if (existing) {
@@ -2104,7 +2126,7 @@ async function doRun(serverOverride?: string): Promise<void> {
         existing.stop()
         runners.delete(agent.id)
       }
-      const runner = new AgentRunner(cfg, agent, engine)
+      const runner = new AgentRunner(cfg, sanitizeAgentForEngine(agent, engine), engine)
       runners.set(agent.id, runner)
       console.log(`[computer] hosting agent ${agent.name} (${agent.id}) on ${engine}`)
       await runner.start()

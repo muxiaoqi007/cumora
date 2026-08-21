@@ -455,7 +455,10 @@ export async function assignAgentToComputer(args: {
   } else {
     const advertised = computer.available_engines ?? []
     const requested = args.engine && PAIRABLE_ENGINES.has(args.engine) ? (args.engine as EngineId) : null
-    const pick = (requested && advertised.includes(requested) ? requested : advertised[0]) as EngineId | undefined
+    // Honor the user's explicit engine even if this computer's last heartbeat
+    // hasn't advertised it yet. Falling back to advertised[0] is what made a
+    // Claude Code picker silently host the agent on Codex.
+    const pick = (requested ?? (advertised[0] as EngineId | undefined))
     if (!pick) return null // a paired computer with no usable engine
     engine = pick
   }

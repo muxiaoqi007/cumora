@@ -64,7 +64,16 @@ export function AgentEditor({ agent, onClose }: Props) {
   const cloud = computers.find((c) => c.kind === 'cloud')
   const firstByoa = computers.find((c) => c.kind !== 'cloud')
   const [computerId, setComputerId] = useState(agent?.computerId ?? (isFreeTier ? firstByoa?.id : cloud?.id) ?? '')
-  const [engine, setEngine] = useState<EngineId>((agent?.engine as EngineId) ?? 'managed')
+  const [engine, setEngine] = useState<EngineId>(() => {
+    const saved = agent?.engine as EngineId | undefined
+    if (saved && saved !== 'managed') return saved
+    const host = agent?.computerId ? computersById[agent.computerId] : undefined
+    if (host && host.kind !== 'cloud') {
+      if (host.availableEngines.includes('claude')) return 'claude'
+      return (host.availableEngines[0] as EngineId) ?? 'claude'
+    }
+    return saved ?? 'managed'
+  })
   const selectedComputer = computerId ? computersById[computerId] : undefined
   const isByoa = !!selectedComputer && selectedComputer.kind !== 'cloud'
   const selectedComputerOffline = isByoa && selectedComputer.status !== 'online'
@@ -134,12 +143,22 @@ export function AgentEditor({ agent, onClose }: Props) {
     if (computerId) return
     if (isFreeTier && firstByoa) {
       setComputerId(firstByoa.id)
-      setEngine((firstByoa.availableEngines[0] as EngineId) ?? 'claude')
+      setEngine((firstByoa.availableEngines.includes('claude') ? 'claude' : firstByoa.availableEngines[0] as EngineId) ?? 'claude')
     } else if (!isFreeTier && cloud) {
       setComputerId(cloud.id)
       setEngine('managed')
     }
   }, [cloud, firstByoa, computerId, isFreeTier])
+
+  useEffect(() => {
+    if (!selectedComputer || selectedComputer.kind === 'cloud') return
+    if (engine === 'managed' || !selectedComputer.availableEngines.includes(engine)) {
+      const next = (selectedComputer.availableEngines.includes('claude')
+        ? 'claude'
+        : selectedComputer.availableEngines[0]) as EngineId
+      if (next && next !== engine) setEngine(next)
+    }
+  }, [selectedComputer?.id, selectedComputer?.kind, selectedComputer?.availableEngines, engine])
 
   const loadRuntimeModels = async (): Promise<void> => {
     if (!canDiscoverModels || !localRuntimeModelBridge) return
@@ -274,9 +293,24 @@ export function AgentEditor({ agent, onClose }: Props) {
       if (isByoa && runtime.requiresFastModel && !fastModel.trim()) {
         throw new Error(`${runtime.label} requires an explicit fast model for local triage. Choose a cheap/small model before saving.`)
       }
+      const target = computerId || cloud?.id
+      const targetComputer = target ? computersById[target] : undefined
+      const isByoaTarget = !!targetComputer && targetComputer.kind !== 'cloud'
+      const resolvedEngine: EngineId = isByoaTarget
+        ? (engine === 'managed'
+            ? ((targetComputer.availableEngines.includes('claude') ? 'claude' : targetComputer.availableEngines[0]) as EngineId)
+            : engine)
+        : 'managed'
+      // Don't carry a Codex/OpenAI model id onto Claude (and vice versa).
+      // That's how a UI set to "Claude Code" still invoked `codex --model gpt-5.6-sol`.
+      let resolvedModel = model.trim() || null
+      const looksOpenAi = (id: string) => /^(gpt-|o[1-9]|codex)/i.test(id)
+      const looksClaude = (id: string) => /^(claude|haiku|sonnet|opus)/i.test(id)
+      if (resolvedEngine === 'claude' && resolvedModel && looksOpenAi(resolvedModel)) resolvedModel = null
+      if (resolvedEngine === 'codex' && resolvedModel && looksClaude(resolvedModel)) resolvedModel = null
       const payload: AgentInput = {
         name, role, systemPrompt, bio, avatarBg,
-        model: model.trim() || null,
+        model: resolvedModel,
         fastModel: fastModel.trim() || null,
       }
       let agentId = agent?.id
@@ -287,13 +321,11 @@ export function AgentEditor({ agent, onClose }: Props) {
         const created = await api.createAgent(payload)
         agentId = created.id
       }
-      const target = computerId || cloud?.id
-      const current = agent?.computerId ?? cloud?.id
-      const targetComputer = target ? computersById[target] : undefined
-      const isByoaTarget = !!targetComputer && targetComputer.kind !== 'cloud'
-      const engineChanged = isByoaTarget && engine !== ((agent?.engine as EngineId) ?? null)
-      if (agentId && target && (target !== current || engineChanged)) {
-        await api.assignAgentComputer(agentId, target, isByoaTarget ? engine : undefined)
+      // Always re-assign on save so the visible Engine dropdown is what the
+      // daemon actually hosts — previously we skipped when computerId was
+      // unchanged and a stale `managed`/`codex` value stayed in the DB.
+      if (agentId && target) {
+        await api.assignAgentComputer(agentId, target, isByoaTarget ? resolvedEngine : undefined)
       }
       if (agentId) {
         await putAgentRuntimeOptions(agentId, {

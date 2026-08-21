@@ -15,7 +15,7 @@ const lazyConnect = process.env.CUMORA_RUNTIME_CLIENT === 'http'
 
 /** Single shared client for normal commands. */
 export const redis = IS_LOCAL
-  ? (require('./redis-local.js').redis as IORedis)
+  ? (await import('./redis-local.js')).redis as IORedis
   : new IORedis(env.REDIS_URL, {
       maxRetriesPerRequest: null,
       enableReadyCheck: true,
@@ -24,7 +24,7 @@ export const redis = IS_LOCAL
 
 /** Separate connection for blocking SUBSCRIBE — required by the Redis protocol. */
 export const sub = IS_LOCAL
-  ? (require('./redis-local.js').sub as IORedis)
+  ? (await import('./redis-local.js')).sub as IORedis
   : new IORedis(env.REDIS_URL, {
       maxRetriesPerRequest: null,
       enableReadyCheck: true,
