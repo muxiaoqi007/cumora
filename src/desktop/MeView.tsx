@@ -10,13 +10,22 @@ import { Checkbox } from '@/components/Checkbox'
 import { cn } from '@/lib/utils'
 import { isWindows } from '@/lib/runtime'
 import { api, getServerOrigin, type ApiProject, type ApiQuotaSnapshot, type ApiQuotaWindow } from '@/api/client'
+import { t } from '@/i18n'
 
 const tabs = ['Profile', 'Usage', 'Computers', 'Projects', 'Trust & autonomy', 'Preferences'] as const
 type Tab = (typeof tabs)[number]
+const TAB_LABEL: Record<Tab, string> = {
+  Profile: 'me.tab.profile',
+  Usage: 'me.tab.usage',
+  Computers: 'me.tab.computers',
+  Projects: 'me.tab.projects',
+  'Trust & autonomy': 'me.tab.trust',
+  Preferences: 'me.tab.preferences',
+}
 
 const PREF_GROUPS: Array<{ title: string; items: Array<{ key: string; lbl: string; sub: string; default: boolean }> }> = [
   {
-    title: 'Notifications',
+    title: t('me.prefs.notifications'),
     items: [
       { key: 'notify.group_pulled', lbl: 'When an agent pulls a group with you in it', sub: 'always · never · only urgent', default: true },
       { key: 'notify.whisper_mention', lbl: 'When a whisper mentions you', sub: 'always · digest · never', default: true },
@@ -25,7 +34,7 @@ const PREF_GROUPS: Array<{ title: string; items: Array<{ key: string; lbl: strin
     ],
   },
   {
-    title: 'Look & feel',
+    title: t('me.prefs.look'),
     items: [
       { key: 'ui.reduce_motion', lbl: 'Reduce motion', sub: 'fewer animations', default: false },
       { key: 'ui.typing_indicators', lbl: 'Show typing indicators', sub: 'see when agents are drafting', default: true },
@@ -33,7 +42,7 @@ const PREF_GROUPS: Array<{ title: string; items: Array<{ key: string; lbl: strin
     ],
   },
   {
-    title: 'Privacy',
+    title: t('me.prefs.privacy'),
     items: [
       { key: 'priv.allow_silent_whispers', lbl: 'Let agents whisper without your peek', sub: 'they still log to your transcript', default: true },
       { key: 'priv.allow_new_tools', lbl: 'Let agents call new tools autonomously', sub: 'with the permissions you\'ve granted', default: true },
@@ -62,7 +71,7 @@ function ProfileTab() {
   const providers = authUser.providers ?? []
   return (
     <div className="space-y-6">
-      <Section title="↳ Identity">
+      <Section title={t('me.identity')}>
         <div className="bg-cloud rounded-[14px] p-5 flex items-start gap-5"
           style={{ border: '1px solid var(--ink-100)' }}>
           {meParticipant
@@ -82,13 +91,13 @@ function ProfileTab() {
         </div>
       </Section>
 
-      <Section title="↳ Session">
+      <Section title={t('me.session')}>
         <div className="bg-cloud rounded-[14px] p-5 flex items-center justify-between gap-4"
           style={{ border: '1px solid var(--ink-100)' }}>
           <div className="min-w-0">
-            <div className="font-display text-[14px] text-ink-800">Signed in to <span className="font-mono text-[12px]">{serverOrigin}</span></div>
+            <div className="font-display text-[14px] text-ink-800">{t('me.signedInTo')} <span className="font-mono text-[12px]">{serverOrigin}</span></div>
             <div className="font-display italic text-[12px] text-ink-400 mt-0.5">
-              Signing out clears the local token and revokes this session on the server.
+              {t('me.signOutHint')}
             </div>
           </div>
           <button
@@ -96,7 +105,7 @@ function ProfileTab() {
             onClick={signOut}
             className="shrink-0 h-9 px-4 rounded-[8px] bg-ink-800 hover:bg-ink-900 text-white text-[13px] font-display transition-colors"
           >
-            Sign out
+            {t('me.signOut')}
           </button>
         </div>
       </Section>
@@ -112,13 +121,13 @@ function ProfileTab() {
  *  has a single, advertised entry point that doesn't go through email. */
 function CommunitySection() {
   return (
-    <Section title="↳ Community & feedback">
+    <Section title={t('me.community')}>
       <div className="bg-cloud rounded-[14px] p-5 flex items-center justify-between gap-4"
         style={{ border: '1px solid var(--ink-100)' }}>
         <div className="min-w-0">
-          <div className="font-display text-[14px] text-ink-800">Join the Cumora Discord</div>
+          <div className="font-display text-[14px] text-ink-800">{t('me.joinDiscord')}</div>
           <div className="font-display italic text-[12px] text-ink-400 mt-0.5">
-            Share feedback, report bugs, and meet other people running agent teams.
+            {t('me.joinDiscordHint')}
           </div>
         </div>
         <a
@@ -131,7 +140,7 @@ function CommunitySection() {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z" />
           </svg>
-          Join Discord
+          {t('me.joinDiscordBtn')}
         </a>
       </div>
     </Section>
@@ -159,7 +168,7 @@ function AboutSection() {
   if (!version) return null
 
   return (
-    <Section title="↳ About">
+    <Section title={t('me.about')}>
       <div className="bg-cloud rounded-[14px] p-5 flex items-center justify-between gap-4"
         style={{ border: '1px solid var(--ink-100)' }}>
         <div className="min-w-0">
@@ -176,7 +185,7 @@ function AboutSection() {
           className="shrink-0 h-9 px-4 rounded-[8px] text-[13px] font-display transition-colors text-white"
           style={{ background: 'var(--skype)' }}
         >
-          Check for updates
+          {t('me.checkUpdates')}
         </button>
       </div>
     </Section>
@@ -680,7 +689,7 @@ function SkypeSoundSection() {
         style={{ border: '1px solid var(--ink-100)' }}>
         <div className="flex items-center gap-4 p-4 cursor-pointer" onClick={() => setMuted(on)}>
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-[13px] text-ink-900">Play classic Skype sounds</div>
+            <div className="font-semibold text-[13px] text-ink-900">{t('me.prefs.skype')}</div>
             <div className="font-display italic font-normal text-[11.5px] text-ink-500 mt-0.5">
               this device only · plays once when a Skype emoticon enters view; click an emoticon to replay
             </div>
@@ -761,7 +770,7 @@ function ComputersTab() {
   }
 
   async function remove(id: string, label: string) {
-    if (!confirm(`Remove "${label}"? Its agents will go offline until you re-pair.`)) return
+    if (!confirm(t('me.computers.removeConfirm', { name: label }))) return
     try {
       await api.deleteComputer(id)
       await useComputers.getState().refresh()
@@ -770,16 +779,12 @@ function ComputersTab() {
 
   return (
     <div className="space-y-6">
-      <Section title="↳ Where your agents run">
+      <Section title={t('me.computers.section')}>
         <p className="text-[13px] text-ink-500 mb-4 max-w-[640px]">
-          Every agent runs on a <strong>Computer</strong>. <em>Cumora Cloud</em> is built in and
-          always on. Pair your own machine or a VPS to run agents on your local
-          <span className="font-mono text-[12px]"> Claude Code</span> or
-          <span className="font-mono text-[12px]"> Codex</span> — each agent gets its own isolated
-          workspace, memory and skills there.
+          {t('me.computers.intro')}
         </p>
 
-        {!loaded && <div className="text-[13px] text-ink-400">Loading…</div>}
+        {!loaded && <div className="text-[13px] text-ink-400">{t('me.computers.loading')}</div>}
 
         <div className="grid gap-3">
           {list.map((c) => {
@@ -798,7 +803,7 @@ function ComputersTab() {
                       <span className="font-display font-medium text-[16px] text-ink-900">{c.name}</span>
                       <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-500">
                         <span className="w-2 h-2 rounded-full" style={{ background: STATUS_COLOR[c.status] ?? 'var(--ink-300)' }} />
-                        {c.status}
+                        {c.status === 'online' ? t('me.computers.online') : c.status === 'offline' ? t('me.computers.offline') : c.status === 'busy' ? t('me.computers.busy') : c.status}
                       </span>
                       {c.daemonOutdated && (
                         <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
@@ -810,7 +815,7 @@ function ComputersTab() {
                     </div>
                     <div className="text-[12px] text-ink-500 mt-0.5">
                       {c.availableEngines.map((e) => ENGINE_LABEL[e] ?? e).join(', ') || '—'}
-                      {' · '}{n} agent{n === 1 ? '' : 's'}
+                      {' · '}{t('me.computers.agents', { n })}
                       {repairable && c.daemonVersion && (
                         <>{' · '}<span className="font-mono text-[11px] text-ink-400">v{c.daemonVersion}</span></>
                       )}
@@ -818,10 +823,10 @@ function ComputersTab() {
                   </div>
                   {repairable && (
                     <>
-                      <span className="text-[12px] font-semibold text-skype-deep">{expanded ? 'Hide' : 'Reconnect'}</span>
+                      <span className="text-[12px] font-semibold text-skype-deep">{expanded ? t('me.computers.hide') : t('me.computers.reconnect')}</span>
                       <button onClick={(e) => { e.stopPropagation(); void remove(c.id, c.name) }}
                         className="text-[12px] font-semibold text-coral-deep hover:underline px-2 py-1">
-                        Remove
+                        {t('me.computers.remove')}
                       </button>
                     </>
                   )}
@@ -915,7 +920,7 @@ function ComputersTab() {
             {err && <div className="mt-4 text-[12px] text-coral-deep bg-coral-soft rounded-[8px] p-2">{err}</div>}
             <button onClick={addComputer} disabled={busy}
               className="mt-4 px-4 py-2 rounded-[10px] bg-skype text-white text-[13px] font-semibold disabled:opacity-50">
-              {busy ? 'Generating…' : '+ Add a computer'}
+              {busy ? t('me.computers.generating') : t('me.computers.add')}
             </button>
           </>
         )}
@@ -1019,27 +1024,27 @@ export function MeView() {
       <div className="max-w-[1100px] mx-auto">
         <div className="mb-6">
           <h1 className="font-display font-medium text-[36px] tracking-tight text-ink-900 mb-1" style={{ letterSpacing: '-0.025em' }}>
-            You <em className="italic text-coral-deep" style={{ fontStyle: 'italic', fontWeight: 400 }}>at the center</em>
+            {t('me.you')} <em className="italic text-coral-deep" style={{ fontStyle: 'italic', fontWeight: 400 }}>{t('me.atCenter')}</em>
           </h1>
           <div className="font-display italic font-normal text-[15px] text-ink-500">
-            How your agents see you, what they remember, and how much rope they get.
+            {t('me.subtitle')}
           </div>
         </div>
 
         <DaemonUpgradeBanner onJump={() => setTab('Computers')} />
 
         <div className="flex gap-1 mb-7 border-b border-ink-100">
-          {tabs.map((t, i) => (
+          {tabs.map((tabKey, i) => (
             <button
-              key={t}
-              onClick={() => setTab(t)}
+              key={tabKey}
+              onClick={() => setTab(tabKey)}
               className={cn(
                 'py-2.5 text-[13px] font-semibold border-b-2 transition -mb-px inline-flex items-center gap-1.5',
                 i === 0 ? 'pl-0 pr-5' : 'px-5',
-                tab === t ? 'border-skype text-skype-deep' : 'border-transparent text-ink-500 hover:text-ink-700',
+                tab === tabKey ? 'border-skype text-skype-deep' : 'border-transparent text-ink-500 hover:text-ink-700',
               )}>
-              {t}
-              {t === 'Computers' && hasOutdated && (
+              {t(TAB_LABEL[tabKey])}
+              {tabKey === 'Computers' && hasOutdated && (
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--gold-deep)' }} title="A daemon needs updating" />
               )}
             </button>
