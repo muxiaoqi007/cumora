@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { t } from '@/i18n';
 import { useApp } from '@/stores/app'
 import { useDocuments } from '@/stores/documents'
 import { DocumentEditor } from '@/components/DocumentEditor'

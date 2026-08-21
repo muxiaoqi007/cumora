@@ -10,6 +10,7 @@
  * way across surfaces.
  */
 import { useEffect, useMemo } from 'react'
+import { t } from '@/i18n';
 import { motion } from 'framer-motion'
 import { Pressable } from './Pressable'
 import { PullToRefresh } from './PullToRefresh'

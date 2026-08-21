@@ -5,6 +5,7 @@
  * `cumora calendar create`, so the two stay shape-compatible.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { t } from '@/i18n';
 import { useCalendar } from '@/stores/calendar'
 import { useParticipants } from '@/stores/participants'
 import { useConversations } from '@/stores/conversations'

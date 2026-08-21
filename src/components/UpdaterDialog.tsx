@@ -17,6 +17,7 @@
  * skype-blue palette, paper backgrounds, Manrope display font.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { t } from '@/i18n';
 import type {
   AppUpdateInfo, AutoUpdateStatus, UpdateReleasePayload,
 } from '@/lib/runtime'

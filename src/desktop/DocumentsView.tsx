@@ -102,7 +102,7 @@ export function DocumentsView() {
 function timeAgo(iso: string): string {
   const then = new Date(iso).getTime()
   const ms = Date.now() - then
-  if (ms < 60_000) return 'just now'
+  if (ms < 60_000) return t('justNow')
   if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m ago`
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`
   return new Date(iso).toLocaleDateString()

@@ -27,6 +27,7 @@
  *   • not_found — bad link.
  */
 import { useCallback, useEffect, useState } from 'react'
+import { t } from '@/i18n';
 import { api, type ApiInvitationPreview } from '@/api/client'
 import { useAuth } from '@/stores/auth'
 import { isElectron, isWebAppHost } from '@/lib/runtime'

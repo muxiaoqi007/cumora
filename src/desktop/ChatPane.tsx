@@ -205,7 +205,7 @@ function ChatHeader({
           ) : (
             <span
               className={cn('truncate', canRename && 'cursor-text hover:text-skype-deep transition')}
-              title={canRename ? 'Click to rename group' : c.title}
+              title={canRename ? t('clickToRenameGroup') : c.title}
               onClick={canRename ? startEditTitle : undefined}
             >{c.title}</span>
           )}

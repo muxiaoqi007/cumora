@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from 'react'
+import { t } from '@/i18n';
 import { Avatar, AvatarStack } from './Avatar'
 import { SkypeEmoji } from './SkypeEmoji'
 import { TwEmoji } from './TwEmoji'

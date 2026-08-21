@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { t } from '@/i18n';
 import {
   api,
   type ApiAgentEvent,
@@ -76,7 +77,7 @@ function elapsed(ms: number): string {
 
 function relative(ts: string): string {
   const delta = Date.now() - new Date(ts).getTime()
-  if (delta < 5000) return 'just now'
+  if (delta < 5000) return t('justNow')
   if (delta < 60_000) return `${Math.round(delta / 1000)}s ago`
   if (delta < 3_600_000) return `${Math.round(delta / 60_000)}m ago`
   return `${Math.round(delta / 3_600_000)}h ago`
@@ -141,7 +142,7 @@ function TraceInputView({ value }: { value: unknown }) {
   if (!Array.isArray(value)) return <PayloadBlock label="Input" value={value} />
   return (
     <div className="space-y-2">
-      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-ink-400">Input messages</div>
+      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-ink-400">t('inputMessages')</div>
       {value.map((item, idx) => {
         const rec = isRecord(item) ? item : {}
         const content = Array.isArray(rec.content) ? rec.content : []
@@ -260,7 +261,7 @@ function EventDetails({ event }: { event: ApiAgentEvent }) {
     <div>
       {specialized}
       <details className="mt-3" open={!specialized && defaultOpen}>
-        <summary className="cursor-pointer select-none text-[11px] font-semibold text-skype-deep">Raw data</summary>
+        <summary className="cursor-pointer select-none text-[11px] font-semibold text-skype-deep">t('rawData')</summary>
         <pre className="mt-2 max-h-[260px] overflow-auto rounded-[9px] bg-ink-900 p-3 text-[11px] leading-[1.45] text-sky2-50">
           {pretty(data)}
         </pre>
@@ -859,7 +860,7 @@ function TriageEconomicsPanel(props: {
 
             {/* Recent per-triage ledger. */}
             <div>
-              <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.12em] text-ink-400">Recent triages</div>
+              <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.12em] text-ink-400">t('recentTriages')</div>
               <div className="space-y-1">
                 {(data.recent ?? []).map((t) => (
                   <div key={t.id} className="flex items-center gap-3 rounded-[8px] border border-ink-100 bg-paper px-3 py-1.5 text-[11.5px]">

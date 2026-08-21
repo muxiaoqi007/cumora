@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { t } from '@/i18n';
 import type { ReactNode } from 'react'
 import { AvatarMini } from '@/components/Avatar'
 import { useBoards } from '@/stores/boards'
@@ -127,7 +128,7 @@ function PeekUnavailable({
 
 function formatShortDate(iso: string): string {
   const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return 'recently'
+  if (Number.isNaN(d.getTime())) return t('recently')
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
@@ -436,7 +437,7 @@ export function CalendarEventPeekContent({
             }}
             disabled={busy !== null}
             className="py-1.5 px-3 text-[12px] font-semibold rounded-full bg-sky2-50 text-skype-deep border border-sky2-100 active:bg-sky2-100 transition disabled:opacity-60"
-          >{busy === 'run' ? 'Running…' : 'Run now'}</button>
+          >{busy === 'run' ? t('running') : t('runNow')}</button>
         )}
         <button
           type="button"

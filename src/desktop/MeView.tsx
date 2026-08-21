@@ -808,7 +808,7 @@ function ComputersTab() {
                       {c.daemonOutdated && (
                         <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
                           style={{ background: 'rgba(244,183,64,0.18)', color: 'var(--gold-deep)' }}
-                          title={c.latestDaemonVersion ? `Update to v${c.latestDaemonVersion}` : 'Update available'}>
+                          title={c.latestDaemonVersion ? `Update to v${c.latestDaemonVersion}` : t('updateAvailable')}>
                           ↑ update{c.daemonVersion ? ` · v${c.daemonVersion}` : ''}
                         </span>
                       )}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { t } from '@/i18n';
 import { api } from '@/api/client'
 import { cn } from '@/lib/utils'
 

@@ -1171,7 +1171,7 @@ function AddToGroupPicker({ participantId, participantName, groups, onClose }: {
             onClick={onClose}
             className="px-4 py-2 rounded-[9px] text-[12.5px] font-semibold text-ink-700 bg-cloud hover:bg-sky2-50 transition"
             style={{ border: '1px solid var(--ink-100)' }}
-          >{done ? 'Done' : 'Cancel'}</button>
+          >{done ? t('done') : t('cancel')}</button>
         </div>
       </div>
     </div>

@@ -28,10 +28,10 @@ function AgentCard({ p, onEdit, onDelete }: {
   const conversations = useConversations((s) => s.list)
   const host = useComputers((s) => (p.computerId ? s.byId[p.computerId] : undefined))
   const hostIcon = !host || host.kind === 'cloud' ? '☁' : host.kind === 'vps' ? '🖥' : '💻'
-  const hostLabel = host ? host.name : 'Cumora Cloud'
+  const hostLabel = host ? host.name : t('cumoraCloud')
   const hostOffline = !!host && host.kind !== 'cloud' && host.status !== 'online'
   const displayStatus = hostOffline ? 'resting' : p.status
-  const displayStatusLabel = hostOffline ? 'Computer offline' : STATUS_LABEL[p.status]
+  const displayStatusLabel = hostOffline ? t('computerOffline') : STATUS_LABEL[p.status]
   const direct = useMemo(
     () => conversations.find((c) => c.kind === 'direct' && c.members.includes(p.id)),
     [conversations, p.id],

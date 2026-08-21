@@ -1,4 +1,5 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { t } from '@/i18n';
 import { createPortal } from 'react-dom'
 import hljs from 'highlight.js/lib/common'
 import Markdown, { type Components } from 'react-markdown'
@@ -224,7 +225,7 @@ export function CodeBlock({ lang, code }: { lang: string; code: string }) {
             background: copied ? 'rgba(110, 197, 106, 0.10)' : 'transparent',
           }}
         >
-          {copied ? 'COPIED' : 'COPY'}
+          {copied ? t('copied') : t('copy')}
         </button>
       </div>
       <pre
@@ -560,8 +561,8 @@ function artifactRefsForMessage(msg: Message): ArtifactRef[] {
 function timeAgo(iso: string): string {
   const then = new Date(iso).getTime()
   const ms = Date.now() - then
-  if (!Number.isFinite(then)) return 'recently'
-  if (ms < 60_000) return 'just now'
+  if (!Number.isFinite(then)) return t('recently')
+  if (ms < 60_000) return t('justNow')
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`
   return new Date(iso).toLocaleDateString()
@@ -580,7 +581,7 @@ function DocumentArtifactCard({ id: rawId, conversationId }: { id: string; conve
     if (!loaded) void loadDocuments()
   }, [loadDocuments, loaded])
 
-  const title = doc?.title?.trim() || (loaded ? 'Document unavailable' : 'Opening document…')
+  const title = doc?.title?.trim() || (loaded ? t('documentUnavailable') : t('openingDocument'))
   const author = doc ? byId[doc.createdBy]?.name ?? doc.createdBy : null
   const updated = doc ? timeAgo(doc.updatedAt) : null
   const isPinnedHere = doc?.conversationId === conversationId
@@ -674,7 +675,7 @@ function BoardArtifactCard({ id: rawId }: { id: string }) {
   }, [id, loadBoard, loadingBoardId, snapshot])
 
   const isBoardPending = !snapshot && (loadingBoardId === id || requestedBoardId.current !== id)
-  const title = snapshot?.title?.trim() || summary?.title?.trim() || (isBoardPending ? 'Opening board...' : 'Board unavailable')
+  const title = snapshot?.title?.trim() || summary?.title?.trim() || (isBoardPending ? t('openingBoard') : t('boardUnavailable'))
   const updated = snapshot?.updatedAt || summary?.updatedAt
   const columns = snapshot?.columns.length ?? null
   const cards = snapshot?.cards.length ?? null
@@ -754,7 +755,7 @@ function CardArtifactCard({ id: rawId }: { id: string }) {
 
   const card = lookup?.card ?? null
   const assignee = card?.assigneeId ? byId[card.assigneeId]?.name ?? card.assigneeId : null
-  const title = card?.title.trim() || (failed ? 'Card unavailable' : 'Opening card...')
+  const title = card?.title.trim() || (failed ? t('cardUnavailable') : t('openingCard'))
   const updated = card?.updatedAt ? timeAgo(card.updatedAt) : null
   const location = lookup ? `${lookup.board.title} -> ${lookup.column.title}` : id
 
@@ -844,7 +845,7 @@ function CalendarArtifactCard({ id: rawId }: { id: string }) {
     }
   }, [event, failed, id, loadEvent, loadingEventId])
 
-  const title = event?.title?.trim() || (failed ? 'Event unavailable' : 'Opening event...')
+  const title = event?.title?.trim() || (failed ? t('eventUnavailable') : t('openingEvent'))
   const assignee = event?.assigneeId ? byId[event.assigneeId]?.name ?? event.assigneeId : null
   const start = event ? new Date(event.startAt) : null
   const startLabel = start && Number.isFinite(start.getTime())
@@ -1096,8 +1097,8 @@ function _EmailCard({ msg }: { msg: Message }) {
       ? 'var(--skype-deep)'
       : '#7A6A3F'
   const recipients = [
-    ...e.to.map((t) => ({ label: 'To', value: t })),
-    ...e.cc.map((c) => ({ label: 'Cc', value: c })),
+    ...e.to.map((item) => ({ label: t('to'), value: item })),
+    ...e.cc.map((item) => ({ label: t('cc'), value: item })),
   ]
   return (
     <div
@@ -1129,7 +1130,7 @@ function _EmailCard({ msg }: { msg: Message }) {
                   : 'text-ink-400 hover:text-ink-700 hover:bg-[rgba(120,110,95,0.10)]',
               )}
               aria-pressed={showHtml}
-              title={showHtml ? 'Hide HTML version' : 'Show HTML version'}
+              title={showHtml ? t('hideHtmlVersion') : t('showHtmlVersion')}
             >
               {showHtml ? 'plain' : 'html'}
             </button>
