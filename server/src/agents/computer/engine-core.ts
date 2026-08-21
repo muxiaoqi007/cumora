@@ -19,9 +19,9 @@
  * `cumora` tool regardless of how we parse stdout.
  */
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
-import { mkdir, writeFile, access, mkdtemp } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, access, mkdtemp } from 'node:fs/promises'
 import { existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join, delimiter as PATH_DELIMITER } from 'node:path'
 import { stripLoneSurrogates } from '../text-safety.js'
 
@@ -874,6 +874,20 @@ class ClaudeAdapter implements EngineAdapter {
     if (!(await exists(settings))) {
       await writeFile(settings, JSON.stringify({ permissions: { allow: ['Bash'] } }, null, 2), 'utf8')
     }
+    // Auto-trust the workspace in ~/.claude.json so the daemon never hits
+    // "this workspace has not been trusted" on headless launch.
+    try {
+      const claudeJson = join(homedir(), '.claude.json')
+      let cfg: Record<string, unknown> = {}
+      try { cfg = JSON.parse(await readFile(claudeJson, 'utf8')) } catch { /* fresh */ }
+      const projects = (typeof cfg.projects === 'object' && cfg.projects !== null && typeof cfg.projects === 'object')
+        ? cfg.projects as Record<string, unknown>
+        : {}
+      const existing = projects[home]
+      projects[home] = { ...(existing as Record<string, unknown> || {}), hasTrustDialogAccepted: true }
+      cfg = { ...cfg, projects }
+      await writeFile(claudeJson, JSON.stringify(cfg, null, 2), { mode: 0o600 })
+    } catch { /* best-effort: don't break seeding */ }
   }
 
   run(args: EngineRunArgs): Promise<EngineRunResult> {

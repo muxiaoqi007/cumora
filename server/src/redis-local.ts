@@ -324,7 +324,7 @@ class LocalRedis extends EventEmitter {
     const len = sorted.length
     const s = start < 0 ? Math.max(0, len + start) : start
     const e = stop < 0 ? len + stop : stop
-    return sorted.slice(s, e + 1).map(([, member]) => member as string)
+    return sorted.slice(s, e + 1).map(([member]) => member)
   }
 
   async zrangebyscore(key: string, min: string | number, max: string | number, ...opts: unknown[]): Promise<string[]> {
@@ -345,7 +345,7 @@ class LocalRedis extends EventEmitter {
     const sorted = [...zset.members.entries()]
       .filter(([, score]) => score >= minVal && score <= maxVal)
       .sort((a, b) => a[1] - b[1])
-    return sorted.slice(limitOffset, limitOffset + limitCount).map(([, member]) => member as string)
+    return sorted.slice(limitOffset, limitOffset + limitCount).map(([member]) => member)
   }
 
   async zrem(key: string, member: string): Promise<number> {
