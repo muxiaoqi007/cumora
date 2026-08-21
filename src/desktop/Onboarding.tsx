@@ -5,6 +5,7 @@ import type { LocalRuntimeEngine, LocalRuntimeStatus } from '@/lib/runtime'
 import { useComputers } from '@/stores/computers'
 import { isWindows } from '@/lib/runtime'
 import { TitleBar } from '@/desktop/TitleBar'
+import { t } from '@/i18n'
 
 /**
  * First-run gate for free-tier users: their agents run on their own machine
@@ -102,23 +103,20 @@ export function Onboarding() {
           <div className="flex items-center gap-3 mb-2">
             <span className="text-[34px] leading-none">💻</span>
             <h1 className="font-display font-medium text-[32px] tracking-tight text-ink-900" style={{ letterSpacing: '-0.02em' }}>
-              Set up your computer
+              {t('onboarding.title')}
             </h1>
           </div>
           <p className="text-[14.5px] text-ink-600 leading-relaxed mb-6 max-w-[580px]">
-            Your agents run on <strong>your own machine</strong> (or a VPS), powered by your local
-            <span className="font-mono text-[13px]"> Claude Code</span>,
-            <span className="font-mono text-[13px]"> Codex</span>, or
-            <span className="font-mono text-[13px]"> Pi</span>. Each agent can choose its own runtime and model later.
+            {t('onboarding.body')}
           </p>
 
           {localBridge ? (
             <div className="bg-cloud rounded-[16px] p-5" style={{ border: '1px solid var(--ink-100)' }}>
               <div className="flex items-start justify-between gap-4 mb-4">
                 <div>
-                  <div className="text-[13px] font-semibold text-ink-900">This computer</div>
+                  <div className="text-[13px] font-semibold text-ink-900">{t('onboarding.thisComputer')}</div>
                   <div className="text-[12px] text-ink-500 mt-0.5">
-                    Cumora Desktop starts the local agent host for you. No terminal, Node command, or pairing command is required.
+                    {t('onboarding.noTerminal')}
                   </div>
                 </div>
                 {localRuntime?.running && (
@@ -157,10 +155,10 @@ export function Onboarding() {
                   {err && <div className="text-[12px] text-coral-deep bg-coral-soft rounded-[8px] p-2 mb-3 whitespace-pre-wrap">{err}</div>}
                   <button onClick={() => { void connectThisComputer() }} disabled={busy || !localReady}
                     className="px-5 py-2.5 rounded-[11px] bg-skype text-white text-[14px] font-semibold disabled:opacity-50">
-                    {busy ? 'Connecting…' : (localRuntime.paired ? 'Reconnect this computer' : 'Connect this computer')}
+                    {busy ? t('onboarding.connecting') : (localRuntime.paired ? t('onboarding.reconnect') : t('onboarding.connect'))}
                   </button>
                   <div className="text-[11px] text-ink-400 mt-2">
-                    Cumora only uses the runtimes already installed and authenticated on this machine; provider credentials stay local.
+                    {t('onboarding.credentialsStay')}
                   </div>
                 </>
               )}

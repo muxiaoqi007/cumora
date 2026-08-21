@@ -23,6 +23,7 @@ import { PollComposer } from '@/components/PollComposer'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
 import { ISearch, IPin, IClip, IAt, ISmile, ISend, IConvene } from '@/components/icons'
 import type { Participant } from '@/types'
+import { t } from '@/i18n'
 
 /** Soft "Coming soon" popover anchored beneath the trigger. Auto-dismisses
  *  after a beat; also closes on outside-click or Escape. The sparkle
@@ -69,7 +70,7 @@ function ComingSoonPop({ onClose }: { onClose: () => void }) {
             style={{ animation: 'cumora-sparkle-drift 2.4s ease-in-out infinite' }}
           >✨</span>
           <div className="min-w-0">
-            <div className="text-[12.5px] font-semibold text-ink-900 leading-tight">Coming soon</div>
+            <div className="text-[12.5px] font-semibold text-ink-900 leading-tight">{t('chat.comingSoon')}</div>
             <div className="text-[11.5px] text-ink-500 font-display italic leading-snug mt-0.5">
               Live working sessions are still on the way.
             </div>
@@ -338,12 +339,12 @@ function ChatHeader({
         <div className="relative">
           <button
             onClick={() => setShowConveneSoon((v) => !v)}
-            title="Convene"
+            title={t('chat.convene')}
             className="px-3.5 inline-flex items-center gap-1.5 font-semibold text-[12.5px] rounded-full text-white"
             style={{ height: 36, background: 'var(--skype)', boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)' }}
           >
             <IConvene className="w-4 h-4" />
-            <span>Convene</span>
+            <span>{t('chat.convene')}</span>
           </button>
           {showConveneSoon && (
             <ComingSoonPop onClose={() => setShowConveneSoon(false)} />
@@ -1081,7 +1082,7 @@ export function Composer({
           <RichInput
             ref={editorRef}
             defaultValue={draft}
-            placeholder={placeholder ?? 'Message the team. Type @ to summon, drop a file to attach.'}
+            placeholder={placeholder ?? t('chat.placeholder')}
             ariaLabel="Message composer"
             className="rich-input whitespace-pre-wrap w-full bg-transparent text-[14px] text-ink-900 leading-[1.5]"
             style={{ minHeight: '1.5em' }}
@@ -1253,7 +1254,7 @@ export function Composer({
               boxShadow: canSend ? '0 4px 12px -3px rgba(0, 168, 240, 0.5)' : 'none',
             }}
           >
-            Send <ISend className="w-3.5 h-3.5" strokeWidth={2} />
+            {t('chat.send')} <ISend className="w-3.5 h-3.5" strokeWidth={2} />
           </button>
         </div>
       </div>
@@ -2036,7 +2037,7 @@ export function ChatPane() {
                   ) : (
                     <div className="flex items-center gap-3 text-ink-300 text-[11px] font-bold tracking-[0.08em] uppercase">
                       <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
-                      Beginning
+                      {t('chat.beginning')}
                       <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
                     </div>
                   )}

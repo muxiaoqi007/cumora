@@ -16,9 +16,19 @@ import { ISearch, IMail, IPlus } from '@/components/icons'
 import { cn } from '@/lib/utils'
 import { api, type ApiProject, type ApiSearchResults } from '@/api/client'
 import type { Conversation, Participant } from '@/types'
+import { t } from '@/i18n'
 
 const staticFilters = ['All', 'Unread', 'Agents', 'Humans', 'Groups', 'Email', 'Whispers'] as const
 type StaticFilter = (typeof staticFilters)[number]
+const FILTER_LABEL: Record<StaticFilter, string> = {
+  All: 'convos.filter.all',
+  Unread: 'convos.filter.unread',
+  Agents: 'convos.filter.agents',
+  Humans: 'convos.filter.humans',
+  Groups: 'convos.filter.groups',
+  Email: 'convos.filter.email',
+  Whispers: 'convos.filter.whispers',
+}
 /** A filter is either one of the static labels, or a project chip identified
  *  by `project:<id>`. Keeping it as a string union lets the existing chip
  *  loop iterate uniformly. */
@@ -817,7 +827,7 @@ export function ConversationsPane({ onResizeStart }: { onResizeStart?: (e: React
     <aside className="relative flex flex-col overflow-hidden border-r border-ink-100 bg-paper">
       <div className="pt-3 px-[18px] pb-2 flex items-center gap-2">
         <h1 className="font-display font-medium text-[20px] tracking-tight text-ink-900 leading-none flex-1 min-w-0 truncate whitespace-nowrap">
-          Conversations
+          {t('convos.title')}
           <svg
             viewBox="0 0 24 24"
             width="17" height="17"
@@ -838,8 +848,8 @@ export function ConversationsPane({ onResizeStart }: { onResizeStart?: (e: React
           type="button"
           onClick={() => setCreating(true)}
           className="inline-flex items-center p-1.5 text-ink-700 bg-cloud border border-ink-100 rounded-[7px] hover:border-sky2-200 hover:text-skype-deep transition shrink-0"
-          title="Create a new group conversation"
-          aria-label="Create a new group conversation"
+          title={t('convos.newGroup')}
+          aria-label={t('convos.newGroup')}
         >
           <IPlus className="w-3.5 h-3.5" strokeWidth={2.5} />
         </button>
@@ -847,8 +857,8 @@ export function ConversationsPane({ onResizeStart }: { onResizeStart?: (e: React
           type="button"
           onClick={useApp.getState().openComposeNew}
           className="inline-flex items-center p-1.5 text-ink-700 bg-cloud border border-ink-100 rounded-[7px] hover:border-sky2-200 hover:text-skype-deep transition shrink-0"
-          title="Compose new email"
-          aria-label="Compose new email"
+          title={t('convos.newEmail')}
+          aria-label={t('convos.newEmail')}
         >
           <IMail className="w-3.5 h-3.5" strokeWidth={2.5} />
         </button>
@@ -880,14 +890,14 @@ export function ConversationsPane({ onResizeStart }: { onResizeStart?: (e: React
             }
           }}
           className="flex-1 min-w-0 bg-transparent outline-none text-ink-700 placeholder:text-ink-300"
-          placeholder="Find a conversation, agent, or human…"
+          placeholder={t('convos.search')}
         />
         {query ? (
           <button
             type="button"
             onClick={() => { setQuery(''); searchRef.current?.focus() }}
             className="shrink-0 grid place-items-center w-4 h-4 rounded-full bg-ink-100 hover:bg-ink-200 text-ink-500 transition"
-            aria-label="Clear search"
+            aria-label={t('convos.clearSearch')}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-2.5 h-2.5">
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -935,7 +945,7 @@ export function ConversationsPane({ onResizeStart }: { onResizeStart?: (e: React
                 boxShadow: '0 1px 2px -1px rgba(0, 120, 200, 0.12)',
               } : undefined}
             >
-              {f}
+              {t(FILTER_LABEL[f])}
               {showBadge && (
                 <span
                   className="inline-grid place-items-center min-w-[16px] h-4 px-1 rounded-full text-[9.5px] font-bold"

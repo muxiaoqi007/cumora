@@ -16,6 +16,7 @@ import { useAuth } from '@/stores/auth'
 import { isElectron } from '@/lib/runtime'
 import { AuthScreen } from './AuthScreen'
 import { WindowDragStrip } from './WindowDragStrip'
+import { t } from '@/i18n'
 
 interface AuthGateProps {
   children: ReactNode
@@ -152,7 +153,7 @@ export function AuthGate({ children, unauthFallback }: AuthGateProps) {
       <div
         className="fixed inset-0 grid place-items-center text-ink-300 font-display italic text-[13px]"
         style={{ background: 'var(--paper)' }}
-      ><WindowDragStrip />loading…</div>
+      ><WindowDragStrip />{t('auth.loading')}</div>
     )
   }
 
@@ -164,7 +165,7 @@ export function AuthGate({ children, unauthFallback }: AuthGateProps) {
         <div className="fixed inset-0 grid place-items-center" style={{ background: 'var(--paper)' }}>
           <WindowDragStrip />
           <div className="text-center max-w-[400px] px-6">
-            <div className="text-[18px] font-medium text-coral-deep mb-2">Startup error</div>
+            <div className="text-[18px] font-medium text-coral-deep mb-2">{t('auth.startupError')}</div>
             <div className="text-[13px] text-ink-500 whitespace-pre-wrap">{localError}</div>
           </div>
         </div>
@@ -174,7 +175,7 @@ export function AuthGate({ children, unauthFallback }: AuthGateProps) {
       <div
         className="fixed inset-0 grid place-items-center text-ink-300 font-display italic text-[13px]"
         style={{ background: 'var(--paper)' }}
-      ><WindowDragStrip />starting local server…</div>
+      ><WindowDragStrip />{t('auth.starting')}</div>
     )
   }
 

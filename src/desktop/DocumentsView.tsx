@@ -5,6 +5,7 @@ import { useAuth } from '@/stores/auth'
 import { useParticipants } from '@/stores/participants'
 import { cn } from '@/lib/utils'
 import { IPlus } from '@/components/icons'
+import { t } from '@/i18n'
 
 export function DocumentsView() {
   const list = useDocuments((s) => s.list)
@@ -38,7 +39,7 @@ export function DocumentsView() {
     <div className="grid h-full overflow-hidden" style={{ gridTemplateColumns: '280px 1fr' }}>
       <aside className="border-r border-ink-100 bg-white flex flex-col min-h-0">
         <header className="px-4 py-3 flex items-center justify-between border-b border-ink-100">
-          <h2 className="font-display text-sm font-medium text-stone-800">Documents</h2>
+          <h2 className="font-display text-sm font-medium text-stone-800">{t('docs.title')}</h2>
           <button
             type="button"
             onClick={handleCreate}

@@ -12,6 +12,7 @@ import { Select } from '@/components/Select'
 import { useResizableWidth } from '@/lib/useResizableWidth'
 import { IBoard, IPlus, IAt, ITrash, IMore } from '@/components/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/i18n'
 import type { BoardCard, BoardCardComment, BoardColumn, Participant } from '@/types'
 
 /**
@@ -82,7 +83,7 @@ function BoardsSidebar({ onResizeStart }: { onResizeStart: (e: React.MouseEvent)
     <aside className="h-full overflow-y-auto border-r border-ink-100 bg-cloud/40 relative">
       <ResizeHandle onMouseDown={onResizeStart} />
       <div className="px-4 py-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-ink-900">Boards</h2>
+        <h2 className="text-lg font-semibold text-ink-900">{t('boards.title')}</h2>
         <button
           onClick={() => setCreating(true)}
           className="w-7 h-7 rounded-md grid place-items-center text-ink-500 hover:bg-ink-50 hover:text-skype-deep"

@@ -26,6 +26,7 @@ import { IPlus, ICalendar, IClock, IRepeat, ITrash } from '@/components/icons'
 import { EventEditor, type EventEditorPrefill } from '@/components/EventEditor'
 import { cn } from '@/lib/utils'
 import type { CalendarEvent, RecurrenceRule } from '@/types'
+import { t } from '@/i18n'
 
 interface AgendaItem {
   event: CalendarEvent
@@ -684,7 +685,7 @@ export function CalendarView() {
       <div className="flex flex-col min-h-0">
         <div className="px-6 py-3 border-b border-ink-100 flex items-center gap-3 shrink-0">
           <ICalendar className="w-5 h-5 text-skype" />
-          <h1 className="text-lg font-semibold text-ink-900">Calendar</h1>
+          <h1 className="text-lg font-semibold text-ink-900">{t('cal.title')}</h1>
 
           <div className="flex items-center gap-1 ml-3">
             <button onClick={goPrev}

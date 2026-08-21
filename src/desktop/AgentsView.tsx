@@ -9,9 +9,10 @@ import { IPlus } from '@/components/icons'
 import { AgentEditor } from '@/components/AgentEditor'
 import { api } from '@/api/client'
 import type { Participant } from '@/types'
+import { t } from '@/i18n'
 
 const STATUS_LABEL: Record<string, string> = {
-  avail: 'Available', working: 'Working', thinking: 'Thinking', waiting: 'Waiting on you', resting: 'Resting',
+  avail: t('agents.available'), working: t('agents.working'), thinking: t('agents.thinking'), waiting: t('agents.waiting'), resting: t('agents.resting'),
 }
 const STATUS_COLOR: Record<string, string> = {
   avail: 'var(--avail)', working: 'var(--working)', thinking: 'var(--thinking)', waiting: 'var(--waiting)', resting: 'var(--resting)',
@@ -113,12 +114,12 @@ function AgentCard({ p, onEdit, onDelete }: {
         "{p.bio || p.systemPrompt || '—'}"
       </div>
 
-      <div className="text-[9.5px] font-bold text-ink-300 tracking-wider uppercase mb-2">Tools</div>
+      <div className="text-[9.5px] font-bold text-ink-300 tracking-wider uppercase mb-2">{t('agents.tools')}</div>
       <div className="flex flex-wrap gap-1 mb-4">
-        {(p.tools ?? []).map((t) => (
-          <span key={t} className="font-mono text-[10.5px] py-0.5 px-1.5 rounded text-ink-700"
+        {(p.tools ?? []).map((tool) => (
+          <span key={tool} className="font-mono text-[10.5px] py-0.5 px-1.5 rounded text-ink-700"
             style={{ background: 'var(--ink-100)' }}>
-            {t}
+            {tool}
           </span>
         ))}
       </div>
@@ -129,11 +130,11 @@ function AgentCard({ p, onEdit, onDelete }: {
           disabled={openingChat}
           className="flex-1 py-2 px-3 bg-skype text-white rounded-[9px] text-[12px] font-semibold transition disabled:opacity-60"
           style={{ boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.4)' }}>
-          {openingChat ? 'Opening…' : 'Chat'}
+          {openingChat ? t('agents.opening') : t('agents.chat')}
         </button>
         <button className="flex-1 py-2 px-3 bg-cloud text-ink-700 rounded-[9px] text-[12px] font-semibold hover:border-whisper-200 hover:text-whisper-deep transition"
           style={{ border: '1px solid var(--ink-100)' }}>
-          Whisper
+          {t('agents.whisper')}
         </button>
       </div>
     </div>
@@ -281,10 +282,10 @@ export function AgentsView() {
         <div className="mb-6 flex items-end gap-4">
           <div className="flex-1">
             <h1 className="font-display font-medium text-[36px] tracking-tight text-ink-900 mb-1" style={{ letterSpacing: '-0.025em' }}>
-              Your team <em className="italic text-skype-deep" style={{ fontWeight: 400 }}>of {list.length}</em>
+              {t('agents.title')} <em className="italic text-skype-deep" style={{ fontWeight: 400 }}>{t('agents.of', { n: list.length })}</em>
             </h1>
             <div className="font-display italic font-normal text-[15px] text-ink-500">
-              Agents work on their own and with each other. They'll loop you in when they need a call.
+              {t('agents.subtitle')}
             </div>
           </div>
           <button
@@ -296,22 +297,22 @@ export function AgentsView() {
             }}
           >
             <IPlus className="w-4 h-4" strokeWidth={2.5} />
-            New agent
+            {t('agents.new')}
           </button>
         </div>
 
         <div className="flex gap-3 mb-6 text-[11px]">
           <div className="py-1.5 px-3 bg-cloud rounded-full text-ink-700 border border-ink-100">
-            <b className="text-skype-deep font-semibold">{list.filter((a) => a.status === 'working').length}</b> working
+            <b className="text-skype-deep font-semibold">{list.filter((a) => a.status === 'working').length}</b> {t('agents.working')}
           </div>
           <div className="py-1.5 px-3 bg-cloud rounded-full text-ink-700 border border-ink-100">
-            <b className="text-thinking font-semibold">{list.filter((a) => a.status === 'thinking').length}</b> thinking
+            <b className="text-thinking font-semibold">{list.filter((a) => a.status === 'thinking').length}</b> {t('agents.thinking')}
           </div>
           <div className="py-1.5 px-3 bg-cloud rounded-full text-ink-700 border border-ink-100">
-            <b className="text-avail font-semibold">{list.filter((a) => a.status === 'avail').length}</b> available
+            <b className="text-avail font-semibold">{list.filter((a) => a.status === 'avail').length}</b> {t('agents.available')}
           </div>
           <div className="py-1.5 px-3 bg-cloud rounded-full text-ink-700 border border-ink-100">
-            <b className="text-resting font-semibold">{list.filter((a) => a.status === 'resting').length}</b> resting
+            <b className="text-resting font-semibold">{list.filter((a) => a.status === 'resting').length}</b> {t('agents.resting')}
           </div>
         </div>
 
